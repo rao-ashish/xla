@@ -34,9 +34,11 @@ extern "C" {
 
 // ---------------------------------- Methods ----------------------------------
 
+// MakeCrossHostReceiveBuffers.
 typedef void (*PJRT_Transfers_CrossHostRecvNotifier)(
     PJRT_Error* error, const char** serialized_descriptors,
-    size_t* descriptors_sizes, size_t num_descriptors, void* user_arg);
+    const bool* descriptors_were_created, size_t* descriptors_sizes,
+    size_t num_descriptors, void* user_arg);
 
 struct PJRT_Transfers_CrossHostRecvNotifierInfo {
   void* user_arg;
@@ -51,6 +53,7 @@ struct PJRT_Transfers_PJRT_Client_MakeCrossHostReceiveBuffers_Args {
   size_t num_shapes;
   size_t* shape_num_dims;
   const int64_t** num_dims;
+  int32_t src_global_device_id;
   PJRT_Buffer_Type* element_types;
   PJRT_Buffer_MemoryLayout** layouts;
   PJRT_Device* device;
@@ -64,6 +67,7 @@ PJRT_DEFINE_STRUCT_TRAITS(
 typedef PJRT_Error* PJRT_Transfers_PJRT_Client_MakeCrossHostReceiveBuffers(
     PJRT_Transfers_PJRT_Client_MakeCrossHostReceiveBuffers_Args* args);
 
+// CopyToRemoteDevice.
 struct PJRT_Transfers_PJRT_Buffer_CopyToRemoteDevice_Args {
   size_t struct_size;
   PJRT_Extension_Base* extension_start;

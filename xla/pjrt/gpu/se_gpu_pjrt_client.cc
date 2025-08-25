@@ -640,7 +640,10 @@ StreamExecutorGpuClient::StreamExecutorGpuClient(
           std::move(gpu_topology), GetAttrsForDevices(addressable_devices()),
           GetTargetConfigForDevices(addressable_devices()))),
       kv_store_(std::move(kv_store)),
-      distributed_client_(std::move(distributed_client)) {
+      distributed_client_(std::move(distributed_client)),
+      cached_communicators_mutex_(),
+      device_id_pairs_to_descriptors_(),
+      descriptors_to_communicators_() {
   const int basePinnedId = device_count();
   for (auto* device : addressable_devices()) {
     // Use the device id to construct a globally unique memory space id. We do
@@ -968,7 +971,6 @@ void StreamExecutorGpuClient::CopyToRemoteDevice(
 
   // Parse the CliqueId;
   CliqueId clique_id(serialized_descriptor);
-
   // Get the local device.
   absl::StatusOr<LocalDeviceState*> local_device =
       tensorflow::down_cast<PjRtStreamExecutorDevice*>(buffer->device())
@@ -987,37 +989,70 @@ void StreamExecutorGpuClient::CopyToRemoteDevice(
   auto* handle = tensorflow::down_cast<PjRtStreamExecutorBuffer*>(buffer);
   PjRtStreamExecutorBuffer::ScopedHold hold = handle->GetBufferWithUsageHold();
 
-  auto send = [gpu_collectives, clique_id, on_done, mem = hold->device_memory(),
-               local_device = *local_device, shape = *shape,
-               dtype = buffer->element_type(),
+  // Convert string_view to string so that we don't risk a use-after-free error
+  // inside the asynchronously executed `send` below.
+  std::string descriptor(serialized_descriptor);
+
+  auto send = [this, descriptor, gpu_collectives, clique_id, on_done,
+               mem = hold->device_memory(), local_device = *local_device,
+               shape = *shape, dtype = buffer->element_type(),
                stream = (*local_device)->GetDeviceToDeviceStream()]() mutable {
     auto f = [&]() -> absl::Status {
-      // Create a communicator.
-      //
-      // TODO(mwhittaker): The way we are constructing GpuCliqueKeys is a big
-      // hack. This code doesn't know the GlobalDeviceId of the sending process.
-      // Instead, we use two arbitrary GlobalDeviceIds. This works because
-      // NcclCommunicators don't actually use the GlobalDeviceIds.  Instead,
-      // they just need to the know the number of devices (2 in this case).
-      gpu::GpuCliqueKey clique_key(
-          /*devices=*/{GlobalDeviceId(0), GlobalDeviceId(1)},
-          /*num_local_participants=*/1);
-      CliqueIds clique_ids(clique_id);
-      gpu::GpuCollectives::Device collectives_device(local_device->executor());
-      std::vector<Collectives::DeviceRank> ranks = {
-          Collectives::DeviceRank(&collectives_device, RankId(1))};
-      gpu::GpuCollectives::Config config;
-      TF_ASSIGN_OR_RETURN(
-          std::vector<std::unique_ptr<Communicator>> communicators,
-          gpu_collectives->CreateCommunicators(clique_key, clique_ids, ranks,
-                                               config));
-      CHECK_EQ(communicators.size(), 1);
-      std::unique_ptr<Communicator> communicator = std::move(communicators[0]);
+      tsl::AsyncValueRef<Communicator::Event> send_event;
+      {
+        // Lock cached communicators mutex while we inspect
+        // device_id_pairs_to_descriptors_ and descriptors_to_communicators_.
+        absl::MutexLock lock(&cached_communicators_mutex_);
 
-      // Send data to the receiver.
-      tsl::AsyncValueRef<Communicator::Event> send_event = communicator->Send(
-          mem->mem(), shape.element_type(), ShapeUtil::ElementsIn(shape),
-          RankId(0), gpu::GpuCollectives::On(*stream));
+        // Try to find a communicator associated with the given descriptor.
+        auto descriptor_communicator_it =
+            descriptors_to_communicators_.find(descriptor);
+
+        // There is no communicator associated with this descriptor, so create
+        // one.
+        if (descriptor_communicator_it == descriptors_to_communicators_.end()) {
+          VLOG(2) << "Creating NCCL communicator inside "
+                     "StreamExecutorGpuClient::CopyToRemoteDevice::send.";
+
+          // TODO(mwhittaker): The way we are constructing GpuCliqueKeys is a
+          // big hack. This code doesn't know the GlobalDeviceId of the sending
+          // process. Instead, we use two arbitrary GlobalDeviceIds. This works
+          // because NcclCommunicators don't actually use the GlobalDeviceIds.
+          // Instead, they just need to the know the number of devices (2 in
+          // this case).
+          gpu::GpuCliqueKey clique_key(
+              /*devices=*/{GlobalDeviceId(0), GlobalDeviceId(1)},
+              /*num_local_participants=*/1);
+          CliqueIds clique_ids(clique_id);
+          gpu::GpuCollectives::Device collectives_device(
+              local_device->executor());
+          std::vector<Collectives::DeviceRank> ranks = {
+              Collectives::DeviceRank(&collectives_device, RankId(1))};
+          gpu::GpuCollectives::Config config;
+          TF_ASSIGN_OR_RETURN(
+              std::vector<std::unique_ptr<Communicator>> communicators,
+              gpu_collectives->CreateCommunicators(clique_key, clique_ids,
+                                                   ranks, config));
+          CHECK_EQ(communicators.size(), 1);
+
+          descriptor_communicator_it =
+              descriptors_to_communicators_
+                  .emplace(descriptor, std::move(communicators[0]))
+                  .first;
+        }
+
+        // At this point, descriptor_communicator_it should be referencing a
+        // valid (descriptor, communicator) pair.
+        if (descriptor_communicator_it == descriptors_to_communicators_.end()) {
+          return absl::InternalError("Communicator for send was not found.");
+        }
+
+        // Send data to the receiver.
+        Communicator& communicator = *descriptor_communicator_it->second;
+        send_event = communicator.Send(mem->mem(), shape.element_type(),
+                                       ShapeUtil::ElementsIn(shape), RankId(0),
+                                       gpu::GpuCollectives::On(*stream));
+      }
 
       // Wait for the send to finish.
       tsl::BlockUntilReady(send_event);
@@ -1045,6 +1080,7 @@ void StreamExecutorGpuClient::CopyToRemoteDevice(
 absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
 StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
     absl::Span<const Shape> shapes, PjRtDevice* device,
+    PjRtGlobalDeviceId src_global_device_id,
     PjRtCrossHostRecvNotifier notifier) {
   // Validate arguments.
   if (shapes.empty()) {
@@ -1058,6 +1094,14 @@ StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
         "supports one shape, but got %d",
         shapes.size());
   }
+  TF_ASSIGN_OR_RETURN(PjRtDevice * src_device,
+                      device->client()->LookupDevice(src_global_device_id));
+  if (src_device->IsAddressable()) {
+    return InvalidArgument(
+        "StreamExecutorGpuClient::MakeCrossHostReceiveBuffers only supports "
+        "transfers across devices on different hosts / processes.");
+  }
+
   Shape shape = shapes[0];
 
   // Get the default GpuCollectives instance.
@@ -1087,50 +1131,120 @@ StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
   // Acquire a hold on the buffer to access the underlying memory.
   PjRtStreamExecutorBuffer::ScopedHold hold = buffer->GetBufferWithUsageHold();
 
-  auto recv = [this, gpu_collectives, notifier, local_device, definition_event,
+  auto recv = [this, src_global_device_id,
+               dst_global_device_id = device->global_device_id(),
+               gpu_collectives, notifier, local_device, definition_event,
                stream, mem = hold->device_memory(), shape = shapes[0],
                dtype = buffer->element_type()]() mutable {
+    tsl::AsyncValueRef<Communicator::Event> recv_event;
     auto f = [&]() -> absl::Status {
-      // Create a CliqueId.
-      TF_ASSIGN_OR_RETURN(CliqueId clique_id,
-                          gpu_collectives->CreateUniqueCliqueId());
+      {
+        // Lock cached communicators mutex while we inspect
+        // device_id_pairs_to_descriptors_ and descriptors_to_communicators_.
+        absl::MutexLock lock(&cached_communicators_mutex_);
 
-      // Notify the caller with the CliqueId. They will send the id to the
-      // sender.
-      //
-      // TODO(mwhittaker): Implement cancellation.
-      notifier(PjRtCrossHostRecvState{
-          /*descriptors=*/{
-              PjRtCrossHostRecvDescriptors{{clique_id.ToString()}}},
-          /*cancel_notifier=*/nullptr,
-      });
+        // Descriptor associated with this device pair.
+        std::string descriptor;
 
-      // Create a communicator.
-      //
-      // TODO(mwhittaker): The way we are constructing GpuCliqueKeys is a big
-      // hack. This code doesn't know the GlobalDeviceId of the sending process.
-      // Instead, we use two arbitrary GlobalDeviceIds. This works because
-      // NcclCommunicators don't actually use the GlobalDeviceIds. Instead, they
-      // just need to the know the number of devices (2 in this case).
-      gpu::GpuCliqueKey clique_key(
-          /*devices=*/{GlobalDeviceId(0), GlobalDeviceId(1)},
-          /*num_local_participants=*/1);
-      CliqueIds clique_ids(clique_id);
-      gpu::GpuCollectives::Device collectives_device(local_device->executor());
-      std::vector<Collectives::DeviceRank> ranks = {
-          Collectives::DeviceRank(&collectives_device, RankId(0))};
-      gpu::GpuCollectives::Config config;
-      TF_ASSIGN_OR_RETURN(
-          std::vector<std::unique_ptr<Communicator>> communicators,
-          gpu_collectives->CreateCommunicators(clique_key, clique_ids, ranks,
-                                               config));
-      CHECK_EQ(communicators.size(), 1);
-      std::unique_ptr<Communicator> communicator = std::move(communicators[0]);
+        // The pair of devices participating in the transfer.
+        std::pair<PjRtGlobalDeviceId, PjRtGlobalDeviceId> device_pair(
+            src_global_device_id, dst_global_device_id);
 
-      // Receive data from the sender.
-      tsl::AsyncValueRef<Communicator::Event> recv_event = communicator->Recv(
-          mem->mem(), shape.element_type(), ShapeUtil::ElementsIn(shape),
-          RankId(1), gpu::GpuCollectives::On(*stream));
+        // Try to find the descriptor associated this device pair.
+        auto it = device_id_pairs_to_descriptors_.find(device_pair);
+
+        // The src/dst device pair is not associated with a descriptor, so
+        // create a new descriptor and communicator.
+        if (it == device_id_pairs_to_descriptors_.end()) {
+          // Create a descriptor / CliqueId.
+          TF_ASSIGN_OR_RETURN(CliqueId clique_id,
+                              gpu_collectives->CreateUniqueCliqueId());
+          descriptor = clique_id.ToString();
+
+          // The descriptor must not already be associated with a communicator.
+          if (descriptors_to_communicators_.contains(descriptor)) {
+            return absl::InternalError(
+                "Newly created clique_id / descriptor is already associated "
+                "with a communicator.");
+          }
+
+          // Notify the caller with the CliqueId. They will send the id to the
+          // sender.
+          //
+          // TODO(mwhittaker): Implement cancellation.
+          notifier(PjRtCrossHostRecvState{
+              /*descriptors=*/{PjRtCrossHostRecvDescriptors{{descriptor}}},
+              /*cancel_notifier=*/nullptr,
+              /*descriptors_were_created=*/{true},
+          });
+
+          // Create the communicator.
+          //
+          // TODO(mwhittaker): The way we are constructing GpuCliqueKeys is a
+          // big
+          // hack. This code doesn't know the GlobalDeviceId of the sending
+          // process. Instead, we use two arbitrary GlobalDeviceIds. This
+          // works because NcclCommunicators don't actually use the
+          // GlobalDeviceIds. Instead, they just need to the know the number
+          // of devices (2 in this case).
+          gpu::GpuCliqueKey clique_key(
+              /*devices=*/{GlobalDeviceId(0), GlobalDeviceId(1)},
+              /*num_local_participants=*/1);
+          CliqueIds clique_ids(clique_id);
+          gpu::GpuCollectives::Device collectives_device(
+              local_device->executor());
+          std::vector<Collectives::DeviceRank> ranks = {
+              Collectives::DeviceRank(&collectives_device, RankId(0))};
+          gpu::GpuCollectives::Config config;
+          TF_ASSIGN_OR_RETURN(
+              std::vector<std::unique_ptr<Communicator>> communicators,
+              gpu_collectives->CreateCommunicators(clique_key, clique_ids,
+                                                   ranks, config));
+
+          // Populate device_id_pairs_to_descriptors_ and
+          // descriptors_to_communicators_ with the new descriptor and
+          // communicator.
+          it = device_id_pairs_to_descriptors_.emplace(device_pair, descriptor)
+                   .first;
+          descriptors_to_communicators_.emplace(descriptor,
+                                                std::move(communicators[0]));
+        } else {
+          descriptor = it->second;
+
+          // Notify the caller with the CliqueId. They will send the id to the
+          // sender.
+          //
+          // TODO(mwhittaker): Implement cancellation.
+          notifier(PjRtCrossHostRecvState{
+              /*descriptors=*/{PjRtCrossHostRecvDescriptors{{descriptor}}},
+              /*cancel_notifier=*/nullptr,
+              /*descriptors_were_created=*/{false},
+          });
+        }
+
+        // At this point, it should be referencing a valid (device_id_pair,
+        // descriptor).
+        if (it == device_id_pairs_to_descriptors_.end()) {
+          return absl::InternalError("it was not successfully set.");
+        }
+
+        // Get the communicator.
+        auto descriptor_communicator_it =
+            descriptors_to_communicators_.find(descriptor);
+
+        if (descriptor_communicator_it == descriptors_to_communicators_.end()) {
+          return absl::InternalError(
+              "Unable to find communicator associated with descriptor "
+              "corresponding to key.");
+        }
+
+        Communicator& communicator = *descriptor_communicator_it->second;
+
+        // Perform the receive.
+        recv_event = communicator.Recv(mem->mem(), shape.element_type(),
+                                       ShapeUtil::ElementsIn(shape), RankId(1),
+                                       gpu::GpuCollectives::On(*stream));
+      }
 
       // Wait for the receive to finish.
       tsl::BlockUntilReady(recv_event);

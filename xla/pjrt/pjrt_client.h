@@ -286,9 +286,12 @@ using PjRtCrossHostSendCancelNotifier = std::function<void(
 // will match the returned PjRtBuffer objects 1:1. Specifically, each PjRtBuffer
 // returned by MakeCrossHostReceiveBuffers will have one
 // PjRtCrossHostRecvDescriptors object containing it descriptor(s).
+// descriptors_were_created[i] specifies whether descriptors[i] is a newly
+// created descriptor or is being re-used from a previous transfer.
 struct PjRtCrossHostRecvState {
   std::vector<PjRtCrossHostRecvDescriptors> descriptors;
   PjRtCrossHostSendCancelNotifier cancel_notifier;
+  std::vector<bool> descriptors_were_created;
 };
 using PjRtCrossHostRecvNotifier =
     std::function<void(absl::StatusOr<PjRtCrossHostRecvState>)>;
@@ -946,6 +949,7 @@ class PjRtClient {
   virtual absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
   MakeCrossHostReceiveBuffers(absl::Span<const Shape> shapes,
                               PjRtDevice* device,
+                              PjRtGlobalDeviceId src_global_device_id,
                               PjRtCrossHostRecvNotifier notifier) {
     return absl::UnimplementedError(
         "MakeCrossHostReceiveBuffers is not implemented.");

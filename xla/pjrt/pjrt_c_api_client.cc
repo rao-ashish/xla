@@ -810,6 +810,7 @@ PJRT_Transfers_CrossHostRecvNotifierInfo CppCrossHostRecvNotifierToC(
   *notifier_function = [&cpp_notifier, c_api](
                            PJRT_Error* error,
                            const char** serialized_descriptors,
+                           const bool* descriptors_were_created,
                            size_t* descriptors_sizes, size_t num_descriptors) {
     if (error != nullptr) {
       absl::Status state = ::pjrt::PjrtErrorToStatus(error, c_api);
@@ -817,11 +818,13 @@ PJRT_Transfers_CrossHostRecvNotifierInfo CppCrossHostRecvNotifierToC(
     }
     xla::PjRtCrossHostRecvState state;
     state.descriptors.reserve(num_descriptors);
+    state.descriptors_were_created.reserve(num_descriptors);
     for (int i = 0; i < num_descriptors; ++i) {
       xla::PjRtCrossHostRecvDescriptors descriptors;
       descriptors.serialized_descriptors.push_back(
           std::string(serialized_descriptors[i], descriptors_sizes[i]));
       state.descriptors.push_back(std::move(descriptors));
+      state.descriptors_were_created.push_back(descriptors_were_created[i]);
     }
 
     // TODO(emilyaf): Support cancellation.
@@ -837,11 +840,13 @@ PJRT_Transfers_CrossHostRecvNotifierInfo CppCrossHostRecvNotifierToC(
       /*user_arg=*/notifier_function,
       /*notifier=*/
       [](PJRT_Error* error, const char** serialized_descriptors,
-         size_t* descriptors_sizes, size_t num_descriptors, void* user_arg) {
+         const bool* descriptors_were_created, size_t* descriptors_sizes,
+         size_t num_descriptors, void* user_arg) {
         PjRtCApiClient::CrossHostRecvNotifierFunction* notifier_fn =
             reinterpret_cast<PjRtCApiClient::CrossHostRecvNotifierFunction*>(
                 user_arg);
-        return (*notifier_fn)(error, serialized_descriptors, descriptors_sizes,
+        return (*notifier_fn)(error, serialized_descriptors,
+                              descriptors_were_created, descriptors_sizes,
                               num_descriptors);
       }};
 }
@@ -849,6 +854,7 @@ PJRT_Transfers_CrossHostRecvNotifierInfo CppCrossHostRecvNotifierToC(
 absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
 PjRtCApiClient::MakeCrossHostReceiveBuffers(
     absl::Span<const Shape> shapes, PjRtDevice* device,
+    xla::PjRtGlobalDeviceId src_global_device_id,
     PjRtCrossHostRecvNotifier notifier) {
   const PJRT_Api* c_api = pjrt_c_api();
   PJRT_CrossHostTransfers_Extension* extension =
@@ -890,6 +896,7 @@ PjRtCApiClient::MakeCrossHostReceiveBuffers(
   }
   args.shape_num_dims = shape_num_dims.data();
   args.num_dims = num_dims.data();
+  args.src_global_device_id = src_global_device_id.value();
   args.element_types = element_type_list.data();
   args.layouts = layout_list.data();
 

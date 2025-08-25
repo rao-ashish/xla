@@ -40,21 +40,32 @@ static xla::PjRtCrossHostRecvNotifier CCrossHostRecvNotifierToCpp(
              absl::StatusOr<xla::PjRtCrossHostRecvState> recv_state) {
     if (!recv_state.ok()) {
       auto error = new PJRT_Error{recv_state.status()};
-      return notifier(error, nullptr, nullptr, 0, user_arg);
+      return notifier(error, nullptr, nullptr, nullptr, 0, user_arg);
     }
+
     auto& descriptors = recv_state->descriptors;
+
     std::vector<size_t> descriptors_sizes;
     descriptors_sizes.reserve(descriptors.size());
+
     std::vector<const char*> serialized_descriptors;
     serialized_descriptors.reserve(descriptors.size());
+
+    std::vector<char> descriptors_were_created;
+    descriptors_were_created.reserve(descriptors.size());
+
     for (int i = 0; i < descriptors.size(); ++i) {
       serialized_descriptors.push_back(
           descriptors[i].serialized_descriptors.front().c_str());
       descriptors_sizes.push_back(
           descriptors[i].serialized_descriptors.front().size());
+      descriptors_were_created.push_back(
+          recv_state->descriptors_were_created[i]);
     }
-    return notifier(nullptr, serialized_descriptors.data(),
-                    descriptors_sizes.data(), descriptors.size(), user_arg);
+    return notifier(
+        nullptr, serialized_descriptors.data(),
+        reinterpret_cast<const bool*>(descriptors_were_created.data()),
+        descriptors_sizes.data(), descriptors.size(), user_arg);
   };
 }
 }  // namespace
@@ -79,7 +90,9 @@ PJRT_Error* PJRT_Transfers_PJRT_Client_MakeCrossHostReceiveBuffers(
   PJRT_ASSIGN_OR_RETURN(
       std::vector<std::unique_ptr<xla::PjRtBuffer>> buffers,
       args->client->client->MakeCrossHostReceiveBuffers(
-          absl::MakeSpan(shapes), args->device->device, std::move(notifier)));
+          absl::MakeSpan(shapes), args->device->device,
+          static_cast<xla::PjRtGlobalDeviceId>(args->src_global_device_id),
+          std::move(notifier)));
   args->num_buffers = buffers.size();
   for (int i = 0; i < buffers.size(); ++i) {
     args->buffers[i] = new PJRT_Buffer{std::move(buffers[i]), args->client};

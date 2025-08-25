@@ -98,6 +98,15 @@ class StreamExecutorGpuHbmMemorySpace : public PjRtStreamExecutorMemorySpace {
   StreamExecutorGpuHbmMemorySpace(int id, PjRtDevice* device);
 };
 
+// Used to cache and reuse NCCL communicators for cross-host transfers.
+struct DeviceIdPairHash {
+  std::size_t operator()(
+      const std::pair<PjRtGlobalDeviceId, PjRtGlobalDeviceId>& p) const {
+    return std::hash<int32_t>()(p.first.value()) ^
+           (std::hash<int>()(p.second.value()) << 1);
+  }
+};
+
 // A custom PjRtClient that overrides the device assignment method.
 class StreamExecutorGpuClient : public xla::PjRtStreamExecutorClient {
  public:
@@ -151,6 +160,7 @@ class StreamExecutorGpuClient : public xla::PjRtStreamExecutorClient {
   absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
   MakeCrossHostReceiveBuffers(absl::Span<const Shape> shapes,
                               PjRtDevice* device,
+                              PjRtGlobalDeviceId src_global_device_id,
                               PjRtCrossHostRecvNotifier notifier) override;
 
   absl::StatusOr<const xla::PjRtTopologyDescription*> GetTopologyDescription()
@@ -189,6 +199,14 @@ class StreamExecutorGpuClient : public xla::PjRtStreamExecutorClient {
   xla::StreamExecutorGpuTopologyDescription topology_;
   std::shared_ptr<KeyValueStoreInterface> kv_store_;
   std::shared_ptr<DistributedRuntimeClient> distributed_client_;
+
+  // Used to cache and reuse NCCL communicators for cross-host transfers.
+  absl::Mutex cached_communicators_mutex_;
+  absl::flat_hash_map<std::pair<PjRtGlobalDeviceId, PjRtGlobalDeviceId>,
+                      std::string, DeviceIdPairHash>
+      device_id_pairs_to_descriptors_;
+  absl::flat_hash_map<std::string, std::unique_ptr<Communicator>>
+      descriptors_to_communicators_;
 
   absl::Mutex task_state_infos_mu_;
   std::vector<tensorflow::CoordinatedTaskStateInfo> task_state_infos_

@@ -307,8 +307,9 @@ class TfPjRtClient : public PjRtClient {
   absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
   MakeCrossHostReceiveBuffers(absl::Span<const Shape> shapes,
                               PjRtDevice* device,
+                              PjRtGlobalDeviceId src_global_device_id,
                               PjRtCrossHostRecvNotifier notifier) override {
-    return wrapped_->MakeCrossHostReceiveBuffers(shapes, device,
+    return wrapped_->MakeCrossHostReceiveBuffers(shapes, transfer_keys, device,
                                                  std::move(notifier));
   }
   absl::StatusOr<const PjRtTopologyDescription*> GetTopologyDescription()
