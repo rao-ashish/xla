@@ -2447,6 +2447,210 @@ TEST(StreamExecutorGpuClientTest, MultipleDeviceShareDmaMapping) {
   TF_EXPECT_OK(client->DmaUnmap(host_dma_ptr.get()));
 }
 
+TEST(StreamExecutorGpuClientTest,
+     MockNcclClientMakeCrossHostReceiveBuffersInvalidTransferOnSameHostTest) {
+  GpuClientOptions client_options = DefaultOptions();
+  client_options.enable_mock_nccl = true;
+  client_options.node_id = 0;
+  client_options.num_nodes = 2;
+  client_options.mock_gpu_topology = "1x2x2";
+  TF_ASSERT_OK_AND_ASSIGN(auto client,
+                          GetStreamExecutorGpuClient(client_options));
+
+  auto devices_per_host = client->addressable_device_count();
+  EXPECT_EQ(devices_per_host, 2) << "This test requires 2 local GPUs.";
+
+  std::vector<Shape> shapes = {
+      ShapeUtil::MakeShapeWithDenseLayout(S32, {32}, {0})};
+
+  PjRtDevice* device_0 = client->addressable_devices()[0];
+  PjRtDevice* device_1 = client->addressable_devices()[1];
+
+  // Notifier is not expected to fire, so does nothing.
+  auto notifier = [](absl::StatusOr<PjRtCrossHostRecvState> recv_state) {
+    FAIL() << "Notifier should not be called for a synchronous argument error.";
+  };
+
+  absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>> result =
+      client->MakeCrossHostReceiveBuffers(
+          absl::Span<const Shape>(shapes.data(), 1), device_0,
+          /*src_global_device_id=*/device_1->global_device_id(), notifier);
+
+  ASSERT_THAT(
+      result.status(),
+      tsl::testing::StatusIs(
+          absl::StatusCode::kInvalidArgument,
+          "StreamExecutorGpuClient::MakeCrossHostReceiveBuffers only supports "
+          "transfers across devices on different hosts / processes."));
+}
+
+TEST(StreamExecutorGpuClientTest,
+     MockNcclClientMakeCrossHostReceiveBuffersCreateNewCommunicator) {
+  GpuClientOptions client_options = DefaultOptions();
+  client_options.enable_mock_nccl = true;
+  client_options.node_id = 0;
+  client_options.num_nodes = 2;
+  client_options.mock_gpu_topology = "1x2x2";
+  TF_ASSERT_OK_AND_ASSIGN(auto client,
+                          GetStreamExecutorGpuClient(client_options));
+
+  // Get the local device we want to receive into.
+  PjRtDevice* local_dst_device = client->addressable_devices()[0];
+  ASSERT_EQ(local_dst_device->global_device_id(), PjRtGlobalDeviceId(0));
+
+  // Get the remote device we will receive from.
+  PjRtGlobalDeviceId remote_src_device_id(2);
+  TF_ASSERT_OK_AND_ASSIGN(PjRtDevice * remote_src_device,
+                          client->LookupDevice(remote_src_device_id));
+  EXPECT_FALSE(remote_src_device->IsAddressable());
+
+  // Buffer shape we want to receive.
+  std::vector<Shape> shapes = {
+      ShapeUtil::MakeShapeWithDenseLayout(S32, {32}, {0})};
+
+  // Set up synchronization and state capture for the async notifier.
+  absl::Notification notifier_ran;
+  std::vector<PjRtCrossHostRecvDescriptors> recv_state_descriptors;
+  std::vector<bool> recv_state_descriptors_were_created;
+
+  // Notifier extracts the recv_state back out into the test.
+  auto notifier = [&](absl::StatusOr<PjRtCrossHostRecvState> recv_state) {
+    ASSERT_IS_OK(recv_state);
+    recv_state_descriptors = recv_state->descriptors;
+    recv_state_descriptors_were_created = recv_state->descriptors_were_created;
+    notifier_ran.Notify();
+  };
+
+  // Run MakeCrossHostReceiveBuffers function.
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto result,
+      client->MakeCrossHostReceiveBuffers(
+          absl::Span<const Shape>(shapes.data(), 1), local_dst_device,
+          remote_src_device->global_device_id(), notifier));
+
+  // Check correct buffer shapes were allocated.
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0]->on_device_shape(), shapes[0]);
+
+  // Wait for recv_state using notifier.
+  ASSERT_TRUE(notifier_ran.WaitForNotificationWithTimeout(absl::Seconds(10)))
+      << "Notifier callback did not run within the timeout.";
+
+  // Check that expected recv_state was received.
+  ASSERT_EQ(recv_state_descriptors.size(), 1);
+  ASSERT_EQ(recv_state_descriptors_were_created.size(), 1);
+  EXPECT_TRUE(recv_state_descriptors_were_created[0]);
+  EXPECT_FALSE(recv_state_descriptors[0].serialized_descriptors[0].empty());
+}
+
+TEST(StreamExecutorGpuClientTest,
+     MockNcclClientMakeCrossHostReceiveBuffersUseCachedCommunicator) {
+  GpuClientOptions client_options = DefaultOptions();
+  client_options.enable_mock_nccl = true;
+  client_options.node_id = 0;
+  client_options.num_nodes = 2;
+  client_options.mock_gpu_topology = "1x2x2";
+  TF_ASSERT_OK_AND_ASSIGN(auto client,
+                          GetStreamExecutorGpuClient(client_options));
+
+  // Get the local device we want to receive into.
+  PjRtDevice* local_dst_device = client->addressable_devices()[0];
+  ASSERT_EQ(local_dst_device->global_device_id(), PjRtGlobalDeviceId(0));
+
+  // Get the remote device we will receive from.
+  PjRtGlobalDeviceId remote_src_device_id(2);
+  TF_ASSERT_OK_AND_ASSIGN(PjRtDevice * remote_src_device,
+                          client->LookupDevice(remote_src_device_id));
+  EXPECT_FALSE(remote_src_device->IsAddressable());
+
+  // Buffer shape we want to receive.
+  std::vector<Shape> shapes = {
+      ShapeUtil::MakeShapeWithDenseLayout(S32, {32}, {0})};
+
+  // Set up synchronization and state capture for first transfer / notifier.
+  absl::Notification notifier_1_ran;
+  auto notifier_1 = [&](absl::StatusOr<PjRtCrossHostRecvState> recv_state) {
+    ASSERT_IS_OK(recv_state);
+    notifier_1_ran.Notify();
+  };
+
+  // Set up synchronization and state capture for second transfer / notifier.
+  absl::Notification notifier_2_ran;
+  std::vector<PjRtCrossHostRecvDescriptors> recv_state_descriptors;
+  std::vector<bool> recv_state_descriptors_were_created;
+  auto notifier_2 = [&](absl::StatusOr<PjRtCrossHostRecvState> recv_state) {
+    ASSERT_IS_OK(recv_state);
+    recv_state_descriptors = std::move(recv_state->descriptors);
+    recv_state_descriptors_were_created =
+        std::move(recv_state->descriptors_were_created);
+    notifier_2_ran.Notify();
+  };
+
+  // Perform the first transfer, creating a new communicator.
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto result_1,
+      client->MakeCrossHostReceiveBuffers(
+          absl::Span<const Shape>(shapes.data(), 1), local_dst_device,
+          remote_src_device->global_device_id(), notifier_1));
+
+  ASSERT_TRUE(notifier_1_ran.WaitForNotificationWithTimeout(absl::Seconds(10)))
+      << "Notifier 1 callback did not run within the timeout.";
+
+  // Perform the second transfer, reusing the first communicator.
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto result_2,
+      client->MakeCrossHostReceiveBuffers(
+          absl::Span<const Shape>(shapes.data(), 1), local_dst_device,
+          remote_src_device->global_device_id(), notifier_2));
+
+  ASSERT_TRUE(notifier_2_ran.WaitForNotificationWithTimeout(absl::Seconds(10)))
+      << "Notifier 2 callback did not run within the timeout.";
+
+  // Check that expected recv_state was received.
+  ASSERT_EQ(recv_state_descriptors.size(), 1);
+  ASSERT_EQ(recv_state_descriptors_were_created.size(), 1);
+  EXPECT_FALSE(recv_state_descriptors_were_created[0]);
+  EXPECT_FALSE(recv_state_descriptors[0].serialized_descriptors[0].empty());
+}
+
+TEST(StreamExecutorGpuClientTest, MockNcclClientCopyToRemoteDevice) {
+  GpuClientOptions client_options = DefaultOptions();
+  client_options.enable_mock_nccl = true;
+  client_options.node_id = 0;
+  client_options.num_nodes = 2;
+  client_options.mock_gpu_topology = "1x2x2";
+  TF_ASSERT_OK_AND_ASSIGN(auto client,
+                          GetStreamExecutorGpuClient(client_options));
+
+  // Allocate a buffer.
+  Shape shape = ShapeUtil::MakeShapeWithDenseLayout(S32, {32}, {0});
+  PjRtDevice* local_device = client->addressable_devices()[0];
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtBuffer> buffer,
+                          client->CreateUninitializedBuffer(
+                              shape, *local_device->default_memory_space()));
+
+  // Initialize the descriptor.
+  std::string descriptor = "test_descriptor";
+
+  // Initialize the remote send callback.
+  absl::Notification notifier_ran;
+  PjRtBuffer::RemoteSendCallback on_done = [&](absl::Status status,
+                                               bool sends_were_enqueued) {
+    ASSERT_IS_OK(status);
+    ASSERT_TRUE(sends_were_enqueued);
+    notifier_ran.Notify();
+  };
+
+  // Call CopyToRemoteDevice.
+  auto promise = PjRtFuture<std::string>::CreatePromise();
+  PjRtFuture<std::string> descriptor_future(promise);
+  promise.Set(std::move(descriptor));
+  buffer->CopyToRemoteDevice(descriptor_future, on_done);
+
+  ASSERT_TRUE(notifier_ran.WaitForNotificationWithTimeout(absl::Seconds(10)))
+      << "Notifier callback did not run within the timeout.";
+}
+
 TEST(TpuLocalClientTest, RawBuffer) {
   TF_ASSERT_OK_AND_ASSIGN(auto client,
                           GetStreamExecutorGpuClient(DefaultOptions()));

@@ -621,7 +621,7 @@ StreamExecutorGpuClient::StreamExecutorGpuClient(
     std::vector<std::unique_ptr<PjRtStreamExecutorDevice>> devices,
     int process_index, std::unique_ptr<se::DeviceMemoryAllocator> allocator,
     std::unique_ptr<tsl::Allocator> host_memory_allocator,
-    bool should_stage_host_to_device_transfers,
+    bool should_stage_host_to_device_transfers, bool enable_mock_nccl,
     std::unique_ptr<gpu::GpuExecutableRunOptions> gpu_run_options,
     std::shared_ptr<KeyValueStoreInterface> kv_store,
     std::shared_ptr<DistributedRuntimeClient> distributed_client,
@@ -643,7 +643,8 @@ StreamExecutorGpuClient::StreamExecutorGpuClient(
       distributed_client_(std::move(distributed_client)),
       cached_communicators_mutex_(),
       device_id_pairs_to_descriptors_(),
-      descriptors_to_communicators_() {
+      descriptors_to_communicators_(),
+      enable_mock_nccl_(enable_mock_nccl) {
   const int basePinnedId = device_count();
   for (auto* device : addressable_devices()) {
     // Use the device id to construct a globally unique memory space id. We do
@@ -1029,16 +1030,23 @@ void StreamExecutorGpuClient::CopyToRemoteDevice(
           std::vector<Collectives::DeviceRank> ranks = {
               Collectives::DeviceRank(&collectives_device, RankId(1))};
           gpu::GpuCollectives::Config config;
-          TF_ASSIGN_OR_RETURN(
-              std::vector<std::unique_ptr<Communicator>> communicators,
-              gpu_collectives->CreateCommunicators(clique_key, clique_ids,
-                                                   ranks, config));
-          CHECK_EQ(communicators.size(), 1);
 
-          descriptor_communicator_it =
-              descriptors_to_communicators_
-                  .emplace(descriptor, std::move(communicators[0]))
-                  .first;
+          if (!enable_mock_nccl_) {
+            TF_ASSIGN_OR_RETURN(
+                std::vector<std::unique_ptr<Communicator>> communicators,
+                gpu_collectives->CreateCommunicators(clique_key, clique_ids,
+                                                     ranks, config));
+            CHECK_EQ(communicators.size(), 1);
+
+            descriptor_communicator_it =
+                descriptors_to_communicators_
+                    .emplace(descriptor, std::move(communicators[0]))
+                    .first;
+          } else {
+            descriptor_communicator_it =
+                descriptors_to_communicators_.emplace(descriptor, nullptr)
+                    .first;
+          }
         }
 
         // At this point, descriptor_communicator_it should be referencing a
@@ -1048,16 +1056,20 @@ void StreamExecutorGpuClient::CopyToRemoteDevice(
         }
 
         // Send data to the receiver.
-        Communicator& communicator = *descriptor_communicator_it->second;
-        send_event = communicator.Send(mem->mem(), shape.element_type(),
-                                       ShapeUtil::ElementsIn(shape), RankId(0),
-                                       gpu::GpuCollectives::On(*stream));
+        if (!enable_mock_nccl_) {
+          Communicator& communicator = *descriptor_communicator_it->second;
+          send_event = communicator.Send(
+              mem->mem(), shape.element_type(), ShapeUtil::ElementsIn(shape),
+              RankId(0), gpu::GpuCollectives::On(*stream));
+        }
       }
 
       // Wait for the send to finish.
-      tsl::BlockUntilReady(send_event);
-      if (send_event.IsError()) {
-        return send_event.GetError();
+      if (!enable_mock_nccl_) {
+        tsl::BlockUntilReady(send_event);
+        if (send_event.IsError()) {
+          return send_event.GetError();
+        }
       }
 
       // Keep mem alive until the Send has finished executing. Note that
@@ -1196,18 +1208,23 @@ StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
           std::vector<Collectives::DeviceRank> ranks = {
               Collectives::DeviceRank(&collectives_device, RankId(0))};
           gpu::GpuCollectives::Config config;
-          TF_ASSIGN_OR_RETURN(
-              std::vector<std::unique_ptr<Communicator>> communicators,
-              gpu_collectives->CreateCommunicators(clique_key, clique_ids,
-                                                   ranks, config));
 
-          // Populate device_id_pairs_to_descriptors_ and
-          // descriptors_to_communicators_ with the new descriptor and
-          // communicator.
+          if (!enable_mock_nccl_) {
+            TF_ASSIGN_OR_RETURN(
+                std::vector<std::unique_ptr<Communicator>> communicators,
+                gpu_collectives->CreateCommunicators(clique_key, clique_ids,
+                                                     ranks, config));
+
+            descriptors_to_communicators_.emplace(descriptor,
+                                                  std::move(communicators[0]));
+          } else {
+            descriptors_to_communicators_.emplace(descriptor, nullptr);
+          }
+
+          // Populate device_id_pairs_to_descriptors_  with the new descriptor.
           it = device_id_pairs_to_descriptors_.emplace(device_pair, descriptor)
                    .first;
-          descriptors_to_communicators_.emplace(descriptor,
-                                                std::move(communicators[0]));
+
         } else {
           descriptor = it->second;
 
@@ -1238,18 +1255,21 @@ StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
               "corresponding to key.");
         }
 
-        Communicator& communicator = *descriptor_communicator_it->second;
-
         // Perform the receive.
-        recv_event = communicator.Recv(mem->mem(), shape.element_type(),
-                                       ShapeUtil::ElementsIn(shape), RankId(1),
-                                       gpu::GpuCollectives::On(*stream));
+        if (!enable_mock_nccl_) {
+          Communicator& communicator = *descriptor_communicator_it->second;
+          recv_event = communicator.Recv(
+              mem->mem(), shape.element_type(), ShapeUtil::ElementsIn(shape),
+              RankId(1), gpu::GpuCollectives::On(*stream));
+        }
       }
 
       // Wait for the receive to finish.
-      tsl::BlockUntilReady(recv_event);
-      if (recv_event.IsError()) {
-        return recv_event.GetError();
+      if (!enable_mock_nccl_) {
+        tsl::BlockUntilReady(recv_event);
+        if (recv_event.IsError()) {
+          return recv_event.GetError();
+        }
       }
 
       // Keep mem alive until the Recv has finished executing. Note that
@@ -1821,8 +1841,9 @@ absl::StatusOr<std::unique_ptr<PjRtClient>> GetStreamExecutorGpuClient(
   return std::make_unique<StreamExecutorGpuClient>(
       pjrt_platform_name, xla_client, std::move(device_topology_pair.first),
       options.node_id, std::move(allocator), std::move(host_memory_allocator),
-      options.should_stage_host_to_device_transfers, std::move(gpu_run_options),
-      std::move(kv_store), std::move(options.distributed_runtime_client),
+      options.should_stage_host_to_device_transfers, options.enable_mock_nccl,
+      std::move(gpu_run_options), std::move(kv_store),
+      std::move(options.distributed_runtime_client),
       options.abort_collectives_on_failure, std::move(gpu_topology),
       options.num_nodes);
 }

@@ -117,7 +117,7 @@ class StreamExecutorGpuClient : public xla::PjRtStreamExecutorClient {
       std::vector<std::unique_ptr<PjRtStreamExecutorDevice>> devices,
       int process_index, std::unique_ptr<se::DeviceMemoryAllocator> allocator,
       std::unique_ptr<tsl::Allocator> host_memory_allocator,
-      bool should_stage_host_to_device_transfers,
+      bool should_stage_host_to_device_transfers, bool enable_mock_nccl,
       std::unique_ptr<gpu::GpuExecutableRunOptions> gpu_run_options,
       std::shared_ptr<KeyValueStoreInterface> kv_store,
       std::shared_ptr<DistributedRuntimeClient> distributed_client,
@@ -207,6 +207,9 @@ class StreamExecutorGpuClient : public xla::PjRtStreamExecutorClient {
       device_id_pairs_to_descriptors_;
   absl::flat_hash_map<std::string, std::unique_ptr<Communicator>>
       descriptors_to_communicators_;
+
+  // Used to bypass communicator creation / usage in unit tests.
+  bool enable_mock_nccl_;
 
   absl::Mutex task_state_infos_mu_;
   std::vector<tensorflow::CoordinatedTaskStateInfo> task_state_infos_
