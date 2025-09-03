@@ -125,6 +125,8 @@ class StreamExecutorGpuClient : public xla::PjRtStreamExecutorClient {
       std::shared_ptr<const GpuTopology> gpu_topology,
       std::optional<int> num_nodes);
 
+  ~StreamExecutorGpuClient();
+
   std::optional<std::shared_ptr<KeyValueStoreInterface>> key_value_store()
       const override {
     return kv_store_;

@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "xla/pjrt/gpu/se_gpu_pjrt_client.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -674,6 +675,21 @@ StreamExecutorGpuClient::StreamExecutorGpuClient(
                });
 }
 
+StreamExecutorGpuClient::~StreamExecutorGpuClient() {
+  // Communicators must be destroyed in a consistent order across all processes
+  // to avoid deadlock.
+  absl::MutexLock lock(&cached_communicators_mutex_);
+
+  std::vector<absl::string_view> sorted_descriptors;
+  for (auto& [descriptor, communicator] : descriptors_to_communicators_) {
+    sorted_descriptors.push_back(descriptor);
+  }
+  std::sort(sorted_descriptors.begin(), sorted_descriptors.end());
+
+  for (absl::string_view key : sorted_descriptors)
+    descriptors_to_communicators_.erase(key);
+}
+
 absl::string_view StreamExecutorGpuClient::platform_version() const {
 #define STRINGIFY2(X) #X
 #define STRINGIFY(X) STRINGIFY2(X)
@@ -1086,7 +1102,7 @@ void StreamExecutorGpuClient::CopyToRemoteDevice(
       on_done(absl::OkStatus(), /*sends_were_enqueued=*/true);
     }
   };
-  thread_pool()->Schedule(send);
+  (*local_device)->execute_thread()->Schedule(send);
 }
 
 absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
@@ -1288,7 +1304,7 @@ StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
       SetEventAsError(definition_event, s);
     }
   };
-  thread_pool()->Schedule(recv);
+  local_device->execute_thread()->Schedule(recv);
 
   std::vector<std::unique_ptr<PjRtBuffer>> buffers;
   buffers.push_back(std::move(buffer));
