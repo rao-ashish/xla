@@ -676,8 +676,14 @@ StreamExecutorGpuClient::StreamExecutorGpuClient(
 }
 
 StreamExecutorGpuClient::~StreamExecutorGpuClient() {
-  // Communicators must be destroyed in a consistent order across all processes
-  // to avoid deadlock.
+  // First make sure all launcher threads have finished their work so that we
+  // don't destroy a communicator they are still using. Clearing owned_devices_
+  // should destroy all device objects, and cause us to block until their
+  // launcher threads have finished.
+  owned_devices_.clear();
+
+  // Communicators must be destroyed in a consistent order across all
+  // processes to avoid deadlock.
   absl::MutexLock lock(&cached_communicators_mutex_);
 
   std::vector<absl::string_view> sorted_descriptors;
@@ -1015,6 +1021,8 @@ void StreamExecutorGpuClient::CopyToRemoteDevice(
                shape = *shape, dtype = buffer->element_type(),
                stream = (*local_device)->GetDeviceToDeviceStream()]() mutable {
     auto f = [&]() -> absl::Status {
+      Communicator* communicator = nullptr;
+
       tsl::AsyncValueRef<Communicator::Event> send_event;
       {
         // Lock cached communicators mutex while we inspect
@@ -1071,17 +1079,16 @@ void StreamExecutorGpuClient::CopyToRemoteDevice(
           return absl::InternalError("Communicator for send was not found.");
         }
 
-        // Send data to the receiver.
-        if (!enable_mock_nccl_) {
-          Communicator& communicator = *descriptor_communicator_it->second;
-          send_event = communicator.Send(
-              mem->mem(), shape.element_type(), ShapeUtil::ElementsIn(shape),
-              RankId(0), gpu::GpuCollectives::On(*stream));
-        }
+        communicator = descriptor_communicator_it->second.get();
       }
 
-      // Wait for the send to finish.
+      // Send data to the receiver.
       if (!enable_mock_nccl_) {
+        if (communicator == nullptr)
+          return absl::InternalError("Communicator for send was not found.");
+        send_event = communicator->Send(mem->mem(), shape.element_type(),
+                                        ShapeUtil::ElementsIn(shape), RankId(0),
+                                        gpu::GpuCollectives::On(*stream));
         tsl::BlockUntilReady(send_event);
         if (send_event.IsError()) {
           return send_event.GetError();
@@ -1166,6 +1173,7 @@ StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
                dtype = buffer->element_type()]() mutable {
     tsl::AsyncValueRef<Communicator::Event> recv_event;
     auto f = [&]() -> absl::Status {
+      Communicator* communicator = nullptr;
       {
         // Lock cached communicators mutex while we inspect
         // device_id_pairs_to_descriptors_ and descriptors_to_communicators_.
@@ -1189,7 +1197,8 @@ StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
                               gpu_collectives->CreateUniqueCliqueId());
           descriptor = clique_id.ToString();
 
-          // The descriptor must not already be associated with a communicator.
+          // The descriptor must not already be associated with a
+          // communicator.
           if (descriptors_to_communicators_.contains(descriptor)) {
             return absl::InternalError(
                 "Newly created clique_id / descriptor is already associated "
@@ -1237,7 +1246,8 @@ StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
             descriptors_to_communicators_.emplace(descriptor, nullptr);
           }
 
-          // Populate device_id_pairs_to_descriptors_  with the new descriptor.
+          // Populate device_id_pairs_to_descriptors_  with the new
+          // descriptor.
           it = device_id_pairs_to_descriptors_.emplace(device_pair, descriptor)
                    .first;
 
@@ -1271,17 +1281,16 @@ StreamExecutorGpuClient::MakeCrossHostReceiveBuffers(
               "corresponding to key.");
         }
 
-        // Perform the receive.
-        if (!enable_mock_nccl_) {
-          Communicator& communicator = *descriptor_communicator_it->second;
-          recv_event = communicator.Recv(
-              mem->mem(), shape.element_type(), ShapeUtil::ElementsIn(shape),
-              RankId(1), gpu::GpuCollectives::On(*stream));
-        }
+        communicator = descriptor_communicator_it->second.get();
       }
 
-      // Wait for the receive to finish.
+      // Perform the receive.
       if (!enable_mock_nccl_) {
+        if (communicator == nullptr)
+          return absl::InternalError("Communicator for recv was not found.");
+        recv_event = communicator->Recv(mem->mem(), shape.element_type(),
+                                        ShapeUtil::ElementsIn(shape), RankId(1),
+                                        gpu::GpuCollectives::On(*stream));
         tsl::BlockUntilReady(recv_event);
         if (recv_event.IsError()) {
           return recv_event.GetError();
