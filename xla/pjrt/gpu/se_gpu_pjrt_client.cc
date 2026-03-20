@@ -570,7 +570,7 @@ absl::StatusOr<PreparedSend> PrepareSend(
               [&](tsl::RCReference<CommonPjRtRawBuffer> buf_raw_buffer,
                   std::vector<tsl::RCReference<tsl::AsyncValue>>
                       buf_definition_events) mutable
-                  -> absl::StatusOr<tsl::RCReference<PjRtDeviceEvent>> {
+              -> absl::StatusOr<tsl::RCReference<PjRtDeviceEvent>> {
                 raw_buffer = std::move(buf_raw_buffer);
                 usage_event->AndThen([raw_buffer]() {});
                 definition_events = std::move(buf_definition_events);
@@ -955,6 +955,17 @@ StreamExecutorGpuClient::PrepareReceiveBuffer(PjRtDevice* device, Shape shape) {
   return PrepareReceiveBufferResult{std::move(buffer), std::move(raw_buffer),
                                     local_device, stream,
                                     std::move(definition_event)};
+}
+
+// Receive functionality for second cross-host transfers API that works with
+// preallocated receive buffers.
+absl::Status StreamExecutorGpuClient::CrossHostReceiveBuffers(
+    xla::PjRtDevice* device, absl::Span<PjRtBuffer*> recv_buffers,
+    absl::Span<const GlobalDeviceId> src_global_device_ids,
+    std::vector<CrossHostTransferKey> transfer_keys) {
+  return absl::UnimplementedError(
+      "CrossHostReceiveBuffers with preallocated receive buffers is not "
+      "supported.");
 }
 
 // Receive functionality for second cross-host transfers API.

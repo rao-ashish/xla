@@ -1493,27 +1493,32 @@ absl::Status PjRtClient::CopyArraysTo(absl::Span<ArrayRef> src_arrays,
 
   // Perform fast cross-host data transfers.
   if (pjrt_supports_cross_host_transfers_ && !force_dcn_cross_host_transfers_) {
-    // TODO: Add new cross-host data transfer copy methods that actually use
-    // the preallocated receive buffers.
-    TF_ASSIGN_OR_RETURN(
-        std::vector<ArrayRef> copy_outputs,
-        CopyArraysForCrossHost(src_arrays, src_devices, dst_devices,
-                               dst_memory_kind, semantics));
+    return CrossHostCopyArraysTo(src_arrays, dst_arrays, src_devices,
+                                 dst_devices, dst_memory_kind, semantics);
 
-    for (int i = 0; i < copy_outputs.size(); ++i) {
-      auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_arrays[i].get());
-      auto* pjrt_copy_output = llvm::dyn_cast<PjRtArray>(copy_outputs[i].get());
+    // Old version that calls into original implementation + substitutes
+    // PjRt buffers.
 
-      if (!pjrt_dst_array || !pjrt_copy_output) {
-        return absl::InternalError(
-            "A supplied destination array or copy output was not a PjRtArray "
-            "inside a PjRt IFRT client.");
-      }
+    // TF_ASSIGN_OR_RETURN(
+    //     std::vector<ArrayRef> copy_outputs,
+    //     CopyArraysForCrossHost(src_arrays, src_devices, dst_devices,
+    //                            dst_memory_kind, semantics));
 
-      TF_RETURN_IF_ERROR(
-          substitute_dst_pjrt_buffers(pjrt_dst_array, pjrt_copy_output));
-    }
-    return absl::OkStatus();
+    // for (int i = 0; i < copy_outputs.size(); ++i) {
+    //   auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_arrays[i].get());
+    //   auto* pjrt_copy_output =
+    //   llvm::dyn_cast<PjRtArray>(copy_outputs[i].get());
+
+    //   if (!pjrt_dst_array || !pjrt_copy_output) {
+    //     return absl::InternalError(
+    //         "A supplied destination array or copy output was not a PjRtArray
+    //         " "inside a PjRt IFRT client.");
+    //   }
+
+    //   TF_RETURN_IF_ERROR(
+    //       substitute_dst_pjrt_buffers(pjrt_dst_array, pjrt_copy_output));
+    // }
+    // return absl::OkStatus();
   }
 
   // Fallback to DCN transfers. Overwrite destination arrays' pjrt_buffers
@@ -1705,6 +1710,199 @@ PjRtClient::CopyArraysForCrossHost(absl::Span<ArrayRef> arrays,
                           std::move(new_layout)));
   }
   return new_arrays;
+}
+
+absl::Status PjRtClient::CrossHostCopyArraysTo(
+    absl::Span<ArrayRef> src_arrays, absl::Span<ArrayRef> dst_arrays,
+    DeviceListRef src_devices, DeviceListRef dst_devices,
+    std::optional<MemoryKind> memory_kind, ArrayCopySemantics semantics) {
+  auto on_send_done = [](absl::Status status) {
+    if (!status.ok()) {
+      LOG(ERROR) << "xla::PjRtClient::CrossHostSendBuffers failed: " << status;
+    }
+  };
+  auto on_recv_done = [](absl::Status status) {
+    if (!status.ok()) {
+      LOG(ERROR) << "xla::PjRtClient::CrossHostReceiveBuffersInto failed: "
+                 << status;
+    }
+  };
+
+  int num_transfers = src_arrays.size();
+
+  // recv_buffers[i][j] is the receive buffer for the jth src_array->dst_array
+  // transfer resident on the ith addressable dst_device.
+  std::vector<std::vector<PjRtBuffer*>> recv_buffers;
+  recv_buffers.reserve(dst_devices->AddressableDeviceList()->size());
+  for (int i = 0; i < dst_devices->AddressableDeviceList()->size(); ++i) {
+    std::vector<PjRtBuffer*> curr_recv_buffers;
+    curr_recv_buffers.reserve(num_transfers);
+    for (int j = 0; j < num_transfers; ++j) {
+      auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_arrays[j].get());
+      if (pjrt_dst_array == nullptr) {
+        return absl::InvalidArgumentError(
+            "Unsupported array type for preallocated cross-host receive");
+      }
+      TF_ASSIGN_OR_RETURN(
+          absl::Span<std::shared_ptr<PjRtBuffer>> curr_mutable_pjrt_buffers,
+          pjrt_dst_array->mutable_pjrt_buffers());
+      curr_recv_buffers.push_back(curr_mutable_pjrt_buffers[i].get());
+    }
+    recv_buffers.push_back(std::move(curr_recv_buffers));
+  }
+
+  int next_addressable_src_buffer = 0;
+  int next_addressable_dst_buffer = 0;
+
+  for (int i = 0; i < dst_devices->size(); ++i) {
+    // TODO(emilyaf, asrao): Extend CreateNewTransferKey to take N and return N
+    // keys as a performance optimization.
+    std::vector<CrossHostTransferKey> transfer_keys;
+    transfer_keys.reserve(num_transfers);
+    for (int k = 0; k < num_transfers; ++k) {
+      transfer_keys.push_back(CreateNewTransferKey());
+    }
+
+    if (src_devices->devices()[i]->IsAddressable()) {
+      // Create send buffers.
+      std::vector<PjRtBuffer*> send_buffers;
+      send_buffers.reserve(num_transfers);
+      for (ArrayRef& src_array : src_arrays) {
+        auto* pjrt_src_array = llvm::dyn_cast<PjRtArray>(src_array.get());
+        if (pjrt_src_array == nullptr) {
+          return absl::InvalidArgumentError(
+              "Unsupported array type for cross-host transfer");
+        }
+        send_buffers.push_back(
+            pjrt_src_array->pjrt_buffers()[next_addressable_src_buffer].get());
+      }
+
+      if (dst_devices->devices()[i]->IsAddressable()) {
+        // This transfer is between two addressable devices.
+        TF_ASSIGN_OR_RETURN(
+            std::vector<std::shared_ptr<PjRtBuffer>> copy_outputs,
+            CopyPjRtBuffersToLocalDevice(next_addressable_src_buffer,
+                                         src_arrays, dst_devices->devices()[i],
+                                         memory_kind, semantics));
+
+        // Replace corresponding buffers of dst_arrays. TODO: Modify
+        // CopyPjRtBuffersToLocalDevice to perform 'true mutation'.
+        if (copy_outputs.size() != num_transfers) {
+          return absl::InternalError(
+              "CopyPjRtBuffersToLocalDevice outputs have unexpected size.");
+        }
+
+        for (int k = 0; k < num_transfers; ++k) {
+          auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_arrays[k].get());
+          if (pjrt_dst_array == nullptr) {
+            return absl::InvalidArgumentError(
+                "Unsupported array type for preallocated cross-host receive");
+          }
+          TF_ASSIGN_OR_RETURN(
+              absl::Span<std::shared_ptr<PjRtBuffer>> curr_mutable_pjrt_buffers,
+              pjrt_dst_array->mutable_pjrt_buffers());
+          curr_mutable_pjrt_buffers[next_addressable_src_buffer] =
+              copy_outputs[k];
+        }
+      } else {
+        // Create vector of (remote) dst devices; we send each array to
+        // dst_devices->devices()[i].
+        TF_ASSIGN_OR_RETURN(xla::GlobalDeviceId dst_global_device_id,
+                            GetGlobalDeviceId(dst_devices->devices()[i]->Id()));
+        std::vector<GlobalDeviceId> dst_global_device_ids(num_transfers,
+                                                          dst_global_device_id);
+
+        // If the PJRT plugin implements the `CrossHostSendBuffers` API, use it.
+        // Otherwise, call this class's `CrossHostSendBuffers` method to use the
+        // plugin's `CopyToRemoteDevice` API, getting the buffer descriptors
+        // from the KV store.
+        absl::StatusOr<std::vector<Future<>>> send_futures =
+            pjrt_client_->CrossHostSendBuffers(
+                send_buffers, std::move(dst_global_device_ids), transfer_keys);
+        if (send_futures.ok()) {
+          for (Future<>& send_future : *send_futures) {
+            send_future.OnReady(on_send_done);
+          }
+        } else if (absl::IsUnimplemented(send_futures.status())) {
+          TF_RETURN_IF_ERROR(
+              CrossHostSendBuffers(send_buffers, std::move(transfer_keys)));
+        } else {
+          return send_futures.status();
+        }
+      }
+      ++next_addressable_src_buffer;
+    } else if (dst_devices->devices()[i]->IsAddressable()) {
+      // Create vector of shapes to receive.
+      std::vector<xla::Shape> recv_shapes;
+      recv_shapes.reserve(num_transfers);
+      for (const ArrayRef& src_array : src_arrays) {
+        TF_ASSIGN_OR_RETURN(xla::PrimitiveType dtype,
+                            ToPrimitiveType(src_array->dtype()));
+        TF_ASSIGN_OR_RETURN(
+            Shape shard_shape,
+            src_array->sharding().GetShardShape(src_array->shape()));
+        xla::Shape recv_shape =
+            xla::ShapeUtil::MakeShape(dtype, shard_shape.dims());
+        recv_shapes.push_back(std::move(recv_shape));
+      }
+
+      // Get the dst device we receive into.
+      TF_ASSIGN_OR_RETURN(xla::GlobalDeviceId pjrt_global_device_id,
+                          GetGlobalDeviceId(dst_devices->devices()[i]->Id()));
+      TF_ASSIGN_OR_RETURN(xla::PjRtDevice * pjrt_device,
+                          pjrt_client_->LookupDevice(pjrt_global_device_id));
+
+      // Create vector of src devices; we receive each array from
+      // src_devices->devices()[i].
+      TF_ASSIGN_OR_RETURN(xla::GlobalDeviceId src_global_device_id,
+                          GetGlobalDeviceId(src_devices->devices()[i]->Id()));
+      std::vector<GlobalDeviceId> src_global_device_ids(num_transfers,
+                                                        src_global_device_id);
+
+      // If the PJRT plugin implements the `CrossHostReceiveBuffers` API, use
+      // it. Otherwise, call this class's `CrossHostReceiveBuffers` method to
+      // use the plugin's `MakeCrossHostReceiveBuffers` API, transmitting the
+      // buffer descriptors via the KV store.
+      absl::Status receive_status = pjrt_client_->CrossHostReceiveBuffers(
+          pjrt_device,
+          absl::MakeSpan(recv_buffers[next_addressable_dst_buffer]),
+          std::move(src_global_device_ids), transfer_keys);
+
+      if (!receive_status.ok() && !absl::IsUnimplemented(receive_status)) {
+        return receive_status;
+      }
+
+      if (absl::IsUnimplemented(receive_status)) {
+        TF_ASSIGN_OR_RETURN(
+            std::vector<std::unique_ptr<PjRtBuffer>> received_buffers,
+            CrossHostReceiveBuffers(recv_shapes, pjrt_device,
+                                    std::move(transfer_keys)));
+
+        // Replace corresponding buffers of dst_arrays. TODO: Modify
+        // CrossHostReceiveBuffers to perform 'true mutation'.
+        if (received_buffers.size() != num_transfers) {
+          return absl::InternalError(
+              "CrossHostReceiveBuffers outputs have unexpected size.");
+        }
+
+        for (int k = 0; k < num_transfers; ++k) {
+          auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_arrays[k].get());
+          if (pjrt_dst_array == nullptr) {
+            return absl::InvalidArgumentError(
+                "Unsupported array type for preallocated cross-host receive");
+          }
+          TF_ASSIGN_OR_RETURN(
+              absl::Span<std::shared_ptr<PjRtBuffer>> curr_mutable_pjrt_buffers,
+              pjrt_dst_array->mutable_pjrt_buffers());
+          curr_mutable_pjrt_buffers[next_addressable_dst_buffer] =
+              std::move(received_buffers[k]);
+        }
+      }
+      ++next_addressable_dst_buffer;
+    }
+  }
+
+  return absl::OkStatus();
 }
 
 absl::Status PjRtClient::InitializeTransferServer() {

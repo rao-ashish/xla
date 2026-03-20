@@ -421,6 +421,17 @@ class PjRtClient final
       DeviceListRef dst_devices, std::optional<MemoryKind> memory_kind,
       ArrayCopySemantics semantics);
 
+  // Copies arrays from source to destination devices when at least one of the
+  // (source, destination) pairs is cross-host. Similar to
+  // CopyArraysForCrossHost, but copies data into preallocated destination
+  // arrays.
+  absl::Status CrossHostCopyArraysTo(absl::Span<ArrayRef> src_arrays,
+                                     absl::Span<ArrayRef> dst_arrays,
+                                     DeviceListRef src_devices,
+                                     DeviceListRef dst_devices,
+                                     std::optional<MemoryKind> memory_kind,
+                                     ArrayCopySemantics semantics);
+
   // Extracts receive descriptors from a key-value store and sends buffers to a
   // remote device. This is used when the backend does not implement the
   // CrossHostSendBuffers API.

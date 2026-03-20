@@ -1068,6 +1068,16 @@ class PjRtClient {
         "Cross-host data transfers are not supported.");
   }
 
+  // Places buffers from a cross-host send onto device.
+  virtual absl::Status CrossHostReceiveBuffers(
+      xla::PjRtDevice* device, absl::Span<PjRtBuffer*> recv_buffers,
+      absl::Span<const GlobalDeviceId> src_global_device_ids,
+      std::vector<CrossHostTransferKey> transfer_keys) {
+    return absl::UnimplementedError(
+        "CrossHostReceiveBuffers with preallocated receive buffers is not "
+        "supported.");
+  }
+
  private:
   std::unique_ptr<PjRtHostMemoryForDeviceManager>
       host_memory_for_device_manager_;
