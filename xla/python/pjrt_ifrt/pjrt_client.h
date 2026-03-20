@@ -248,6 +248,10 @@ class PjRtClient final
       std::optional<MemoryKind> memory_kind,
       ArrayCopySemantics semantics) override;
 
+  absl::Status CopyArraysTo(absl::Span<ArrayRef> src_arrays,
+                            absl::Span<ArrayRef> dst_arrays,
+                            ArrayCopySemantics semantics) override;
+
   absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> RemapArrays(
       const RemapPlan& plan, absl::Span<xla::ifrt::ArrayRef> arrays,
       ArrayCopySemantics semantics) override;
