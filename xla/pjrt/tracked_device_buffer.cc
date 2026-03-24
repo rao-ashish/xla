@@ -280,19 +280,43 @@ Future<> TrackedDeviceBuffer::GetReadyFuture(PjRtMemorySpace* memory_space) {
   }
   absl::Span<tsl::RCReference<tsl::AsyncValue> const> definition_events_span =
       definition_events;
-  tsl::RunWhenReady(
-      definition_events_span,
-      [promise = std::move(promise),
-       definition_events = std::move(definition_events)]() mutable {
-        for (auto& event : definition_events) {
-          if (const absl::Status* error = event->GetErrorIfPresent()) {
-            promise.Set(*error);
-            return;
-          }
-        }
-        promise.Set();
-      });
+  tsl::RunWhenReady(definition_events_span, [promise = std::move(promise),
+                                             definition_events = std::move(
+                                                 definition_events)]() mutable {
+    std::cout << "Setting promises inside TrackedDeviceBuffer::GetReadyFuture"
+              << std::endl;
+
+    for (auto& event : definition_events) {
+      if (const absl::Status* error = event->GetErrorIfPresent()) {
+        promise.Set(*error);
+        return;
+      }
+    }
+    promise.Set();
+  });
   return future;
+}
+
+absl::Status TrackedDeviceBuffer::ReplaceDefinitionEvents(
+    std::vector<tsl::RCReference<tsl::AsyncValue>> new_definition_events) {
+  std::vector<BufferSequencingEventRef> casted_new_definition_events;
+  casted_new_definition_events.reserve(new_definition_events.size());
+
+  for (tsl::RCReference<tsl::AsyncValue>& new_definition_event :
+       new_definition_events) {
+    if (!new_definition_event->IsType<BufferSequencingEvent>()) {
+      return absl::InvalidArgumentError(
+          "TrackedDeviceBuffer::ReplaceDefinitionEvents() received new "
+          "definition events which were not BufferSequencingEvents.");
+    }
+    tsl::AsyncValueRef<BufferSequencingEvent> event_ref(new_definition_event);
+    casted_new_definition_events.push_back(event_ref);
+  }
+
+  definition_events_.assign(
+      std::make_move_iterator(casted_new_definition_events.begin()),
+      std::make_move_iterator(casted_new_definition_events.end()));
+  return absl::OkStatus();
 }
 
 void TrackedDeviceBuffer::Delete(PjRtMemorySpace* memory_space) {

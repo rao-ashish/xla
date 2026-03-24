@@ -2317,13 +2317,15 @@ CommonPjRtBufferImpl::DonateWithControlDependency(Future<> dependency) {
 }
 
 Future<> CommonPjRtBufferImpl::GetReadyFuture() {
-  absl::MutexLock lock(mu_);
   if (!device_buffer()) {
     return Future<>(InvalidArgument(
         "GetReadyFuture() called on deleted or donated buffer"));
   }
+
+  auto hold = GetBufferWithHold(CommonPjRtBuffer::ScopedHold::kDonation);
+
   if (!definition_future_) {
-    auto future = device_buffer()->GetReadyFuture(memory_space());
+    auto future = hold.buffer()->GetReadyFuture(memory_space());
     definition_future_ = client()->CreateProfiledFuture(
         memory_space(), "CommonPjRtBuffer", "Await", std::move(future));
   }

@@ -46,11 +46,15 @@ class AbstractTrackedDeviceBuffer {
 
   // Construct (or return) a vector of tsl::AsyncValue events which
   // will become ready when this buffer is ready.
+  // IMPORTANT: Definition events are only safe to use while some hold is
+  // registered on the PjRtBuffer that manages this AbstractTrackedDeviceBuffer.
   virtual std::vector<tsl::RCReference<tsl::AsyncValue>>
   GetAsyncValueDefinitionEvents() = 0;
 
   // Construct (or return) a vector of tsl::AsyncValue events which
   // will become ready when this buffer is ok to mutate.
+  // IMPORTANT: Definition events are only safe to use while some hold is
+  // registered on the PjRtBuffer that manages this AbstractTrackedDeviceBuffer.
   virtual std::vector<tsl::RCReference<tsl::AsyncValue>>
   GetAsyncValueDefinitionAndUsageEvents() = 0;
 
@@ -102,6 +106,13 @@ class AbstractTrackedDeviceBuffer {
   virtual absl::Status WaitUntilBufferReadyOnStream(std::intptr_t stream) {
     return absl::UnimplementedError(
         "WaitUntilBufferReadyOnStream is only implemented for GPU.");
+  }
+
+  // Only to be called by a donation ScopedHold when working with a buffer we
+  // are mutating.
+  virtual absl::Status ReplaceDefinitionEvents(
+      std::vector<tsl::RCReference<tsl::AsyncValue>> new_definition_events) {
+    return Unimplemented("ReplaceDefinitionEvents is not supported.");
   }
 
   // TODO(parkers): definition events are fixed, so we should just store them
@@ -208,6 +219,14 @@ class CommonPjRtBuffer : public PjRtBuffer {
     }
     CommonPjRtBuffer* parent() const { return parent_; }
 
+    // Replaces the definition events of the underlying
+    // AbstractTrackedDeviceBuffer. Only valid for holds of type kDonation.
+    // WARNING: Before calling this method, you need to wait on all prior
+    // definition and usage events returned by
+    // buffer()->GetAsyncValueDefinitionAndUsageEvents().
+    absl::Status ReplaceDefinitionEvents(
+        std::vector<tsl::RCReference<tsl::AsyncValue>> new_definition_events);
+
     // Confirms that the buffer was successfully donated to an execution.
     // Only valid for holds of type kDonation. Causes the buffer to become
     // invalid.
@@ -260,8 +279,8 @@ class CommonPjRtBuffer : public PjRtBuffer {
 
   absl::Status AcquireScopedRawBuffer(
       absl::AnyInvocable<absl::StatusOr<tsl::RCReference<PjRtDeviceEvent>>(
-          tsl::RCReference<CommonPjRtRawBuffer> raw_buffer,
-          std::vector<tsl::RCReference<tsl::AsyncValue>> definition_events) &&>
+                             tsl::RCReference<CommonPjRtRawBuffer> raw_buffer,
+                             std::vector<tsl::RCReference<tsl::AsyncValue>> definition_events) &&>
           scoped_acquire,
       const char* caller_name = "AcquireScopedRawBuffer");
 

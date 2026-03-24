@@ -209,6 +209,34 @@ void CommonPjRtBuffer::ScopedHold::AcquireUsageOrExternalReference(
   CHECK(!ok() || buffer_ptr_ != nullptr);
 }
 
+absl::Status CommonPjRtBuffer::ScopedHold::ReplaceDefinitionEvents(
+    std::vector<tsl::RCReference<tsl::AsyncValue>> new_definition_events) {
+  if (!ok()) {
+    return absl::InternalError(
+        "Unable to replace definition events through ScopedHold because "
+        "ScopedHold did not have state kValid.");
+  }
+
+  if (type() != kDonation) {
+    return absl::InternalError(
+        "Unable to replace definition events through ScopedHold because "
+        "the ScopedHold was not a donation hold.");
+  }
+
+  absl::Status status =
+      buffer()->ReplaceDefinitionEvents(std::move(new_definition_events));
+  if (!status.ok()) {
+    return status;
+  }
+
+  {
+    absl::MutexLock lock(&parent()->mu_);
+    parent()->definition_future_ = {};
+  }
+
+  return absl::OkStatus();
+}
+
 void CommonPjRtBuffer::ScopedHold::ConfirmDonation() {
   CHECK(ok());
   CHECK_EQ(type(), kDonation);

@@ -1423,132 +1423,27 @@ absl::Status PjRtClient::CopyArraysTo(absl::Span<ArrayRef> src_arrays,
     }
   }
 
-  // If all transfers are host-local, use the PjRtArray::Copy API to perform
-  // transfers.
-  // TODO: For host-local transfers, the current implementation does not
-  // actually copy into the preallocated destination array. Instead, it
-  // allocates a new array, copies data into that, and then fudges the metadata
-  // of dst_arrays (specifically, each dst_array's pjrt_buffers) to point to
-  // the newly allocated PjRt buffers. This is done because the PjRtArray::Copy
-  // API cannot take a preallocated destination buffer as input.
-  // PjRtArray::Copy should be modified / a variant of it should be added that
-  // supports copying into a preallocated destination buffer.
-  auto substitute_dst_pjrt_buffers =
-      [](PjRtArray* pjrt_dst_array,
-         PjRtArray* pjrt_copy_output) -> absl::Status {
-    TF_ASSIGN_OR_RETURN(
-        absl::Span<std::shared_ptr<PjRtBuffer>> dst_array_pjrt_buffers,
-        pjrt_dst_array->mutable_pjrt_buffers());
-
-    absl::Span<const std::shared_ptr<PjRtBuffer>> copy_output_pjrt_buffers =
-        pjrt_copy_output->pjrt_buffers();
-
-    if (dst_array_pjrt_buffers.size() != copy_output_pjrt_buffers.size()) {
-      return absl::InternalError(
-          "Mismatch in number of PjRt buffers between copy output and "
-          "preallocated destination array.");
-    }
-
-    for (int j = 0; j < dst_array_pjrt_buffers.size(); ++j) {
-      dst_array_pjrt_buffers[j] = copy_output_pjrt_buffers[j];
-    }
-
-    return absl::OkStatus();
-  };
-
+  // Transfers that mutate receives are only supported for the cross-host case.
   if (all_host_local_transfers) {
-    // Iterate over all (src, dst) array pairs.
-    for (int i = 0; i < src_arrays.size(); ++i) {
-      const ArrayRef& src_array = src_arrays[i];
-      ArrayRef& dst_array = dst_arrays[i];
+    return absl::UnimplementedError(
+        "Host-local transfers with preallocated receive buffers are not yet "
+        "implemented.");
+  }
 
-      if (auto* const pjrt_src_array =
-              llvm::dyn_cast<PjRtArray>(src_array.get())) {
-        // Perform the allocation + copy.
-        TF_ASSIGN_OR_RETURN(
-            ArrayRef copy_output,
-            pjrt_src_array->Copy(dst_devices, dst_memory_kind, semantics));
+  if (!pjrt_supports_cross_host_transfers_) {
+    return absl::UnimplementedError(
+        "This PjRt client does not implement CrossHostCopyArraysTo.");
+  }
 
-        // HACK: Just overwrite the pjrt buffer pointers of the destination
-        // PjRt Array to be pointers to copy_output's PjRt buffers.
-        auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_array.get());
-        auto* pjrt_copy_output = llvm::dyn_cast<PjRtArray>(copy_output.get());
-
-        if (!pjrt_dst_array || !pjrt_copy_output) {
-          return absl::InternalError(
-              "A supplied destination array or copy output was not a PjRtArray "
-              "inside a PjRt IFRT client.");
-        }
-
-        TF_RETURN_IF_ERROR(
-            substitute_dst_pjrt_buffers(pjrt_dst_array, pjrt_copy_output));
-
-      } else {  // TODO: Support string arrays.
-        return absl::InvalidArgumentError(
-            "Unsupported array type for PjRtClient::CopyArraysTo");
-      }
-    }
-    return absl::OkStatus();
+  if (force_dcn_cross_host_transfers_) {
+    return absl::UnimplementedError(
+        "Host-fallback cross host transfers with preallocated receive buffers "
+        "are not yet implemented.");
   }
 
   // Perform fast cross-host data transfers.
-  if (pjrt_supports_cross_host_transfers_ && !force_dcn_cross_host_transfers_) {
-    return CrossHostCopyArraysTo(src_arrays, dst_arrays, src_devices,
-                                 dst_devices, dst_memory_kind, semantics);
-
-    // Old version that calls into original implementation + substitutes
-    // PjRt buffers.
-
-    // TF_ASSIGN_OR_RETURN(
-    //     std::vector<ArrayRef> copy_outputs,
-    //     CopyArraysForCrossHost(src_arrays, src_devices, dst_devices,
-    //                            dst_memory_kind, semantics));
-
-    // for (int i = 0; i < copy_outputs.size(); ++i) {
-    //   auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_arrays[i].get());
-    //   auto* pjrt_copy_output =
-    //   llvm::dyn_cast<PjRtArray>(copy_outputs[i].get());
-
-    //   if (!pjrt_dst_array || !pjrt_copy_output) {
-    //     return absl::InternalError(
-    //         "A supplied destination array or copy output was not a PjRtArray
-    //         " "inside a PjRt IFRT client.");
-    //   }
-
-    //   TF_RETURN_IF_ERROR(
-    //       substitute_dst_pjrt_buffers(pjrt_dst_array, pjrt_copy_output));
-    // }
-    // return absl::OkStatus();
-  }
-
-  // Fallback to DCN transfers. Overwrite destination arrays' pjrt_buffers
-  // like the host local case.
-  if (transfer_server_factory_ != nullptr) {
-    TF_ASSIGN_OR_RETURN(
-        std::vector<ArrayRef> copy_outputs,
-        CopyArraysForCrossHostFallback(src_arrays, src_devices, dst_devices,
-                                       dst_memory_kind));
-
-    for (int i = 0; i < copy_outputs.size(); ++i) {
-      auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_arrays[i].get());
-      auto* pjrt_copy_output = llvm::dyn_cast<PjRtArray>(copy_outputs[i].get());
-
-      if (!pjrt_dst_array || !pjrt_copy_output) {
-        return absl::InternalError(
-            "A supplied destination array or copy output was not a PjRtArray "
-            "inside a PjRt IFRT client.");
-      }
-
-      TF_RETURN_IF_ERROR(
-          substitute_dst_pjrt_buffers(pjrt_dst_array, pjrt_copy_output));
-    }
-    return absl::OkStatus();
-  }
-
-  return absl::UnimplementedError(
-      "Cross-host transfers are not supported by this backend. Set the "
-      "`--jax_cross_host_transfer_socket_address` flag to enable DCN transfers "
-      "on Linux for any backend.");
+  return CrossHostCopyArraysTo(src_arrays, dst_arrays, src_devices, dst_devices,
+                               dst_memory_kind, semantics);
 }
 
 absl::StatusOr<std::vector<xla::ifrt::ArrayRef>>
@@ -1863,8 +1758,9 @@ absl::Status PjRtClient::CrossHostCopyArraysTo(
       // it. Otherwise, call this class's `CrossHostReceiveBuffers` method to
       // use the plugin's `MakeCrossHostReceiveBuffers` API, transmitting the
       // buffer descriptors via the KV store.
-      absl::Status receive_status = pjrt_client_->CrossHostReceiveBuffers(
-          pjrt_device,
+      std::cout << "Launching CrossHostReceiveBuffersInto." << std::endl;
+
+      absl::Status receive_status = pjrt_client_->CrossHostReceiveBuffersInto(
           absl::MakeSpan(recv_buffers[next_addressable_dst_buffer]),
           std::move(src_global_device_ids), transfer_keys);
 
@@ -1885,6 +1781,10 @@ absl::Status PjRtClient::CrossHostCopyArraysTo(
               "CrossHostReceiveBuffers outputs have unexpected size.");
         }
 
+        for (std::unique_ptr<PjRtBuffer>& buffer : received_buffers) {
+          buffer->GetReadyFuture().OnReady(on_recv_done);
+        }
+
         for (int k = 0; k < num_transfers; ++k) {
           auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_arrays[k].get());
           if (pjrt_dst_array == nullptr) {
@@ -1896,6 +1796,10 @@ absl::Status PjRtClient::CrossHostCopyArraysTo(
               pjrt_dst_array->mutable_pjrt_buffers());
           curr_mutable_pjrt_buffers[next_addressable_dst_buffer] =
               std::move(received_buffers[k]);
+        }
+      } else {
+        for (PjRtBuffer* buffer : recv_buffers[next_addressable_dst_buffer]) {
+          buffer->GetReadyFuture().OnReady(on_recv_done);
         }
       }
       ++next_addressable_dst_buffer;

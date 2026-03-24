@@ -1069,8 +1069,8 @@ class PjRtClient {
   }
 
   // Places buffers from a cross-host send onto device.
-  virtual absl::Status CrossHostReceiveBuffers(
-      xla::PjRtDevice* device, absl::Span<PjRtBuffer*> recv_buffers,
+  virtual absl::Status CrossHostReceiveBuffersInto(
+      absl::Span<PjRtBuffer*> recv_buffers,
       absl::Span<const GlobalDeviceId> src_global_device_ids,
       std::vector<CrossHostTransferKey> transfer_keys) {
     return absl::UnimplementedError(

@@ -80,6 +80,22 @@ PJRT_DEFINE_STRUCT_TRAITS(
 typedef PJRT_Error* PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers(
     PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers_Args* args);
 
+struct PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto_Args {
+  size_t struct_size;
+  PJRT_Extension_Base* extension_start;
+  PJRT_Client* client;
+  size_t num_buffers;
+  PJRT_Buffer** recv_buffers;
+  const xla::GlobalDeviceId* src_global_device_ids;  // Has size num_buffers.
+  const xla::CrossHostTransferKey* transfer_keys;    // Has size num_buffers.
+};
+
+PJRT_DEFINE_STRUCT_TRAITS(
+    PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto_Args, transfer_keys);
+
+typedef PJRT_Error* PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto(
+    PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto_Args* args);
+
 // The structs and methods below correspond to the original cross-host transfers
 // API.
 typedef void (*PJRT_Transfers_CrossHostOnCanceledCallback)(PJRT_Error* error,
@@ -164,11 +180,14 @@ typedef struct PJRT_CrossHostTransfers_Extension {
       PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers;
   PJRT_Transfers_PJRT_Client_CrossHostSendBuffers*
       PJRT_Transfers_PJRT_Client_CrossHostSendBuffers;
+  PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto*
+      PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto;
 } PJRT_CrossHostTransfers_Extension;
 // NOLINTEND
 
-PJRT_DEFINE_STRUCT_TRAITS(PJRT_CrossHostTransfers_Extension,
-                          PJRT_Transfers_PJRT_Client_CrossHostSendBuffers);
+PJRT_DEFINE_STRUCT_TRAITS(
+    PJRT_CrossHostTransfers_Extension,
+    PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto);
 
 #ifdef __cplusplus
 }

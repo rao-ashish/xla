@@ -191,6 +191,12 @@ class TrackedDeviceBuffer : public AbstractTrackedDeviceBuffer {
 
   Future<> GetReadyFuture(PjRtMemorySpace* memory_space) override;
 
+  // Only to be called by a donation ScopedHold when working with a buffer we
+  // are mutating.
+  absl::Status ReplaceDefinitionEvents(
+      std::vector<tsl::RCReference<tsl::AsyncValue>> new_definition_events)
+      override;
+
   absl::StatusOr<tsl::RCReference<PjRtDeviceEvent>> GetDefinitionEvent(
       PjRtMemorySpace* memory_space) override;
 
