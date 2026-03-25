@@ -35,7 +35,7 @@ extern "C" {
 // CrossHostSendBuffers and CrossHostReceiveBuffers. These methods allow PjRt
 // clients to implement various optimizations for cross-host transfers.
 
-#define PJRT_API_CROSS_HOST_TRANSFERS_EXTENSION_VERSION 5
+#define PJRT_API_CROSS_HOST_TRANSFERS_EXTENSION_VERSION 6
 
 // ---------------------------------- Methods ----------------------------------
 

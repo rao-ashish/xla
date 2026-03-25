@@ -1758,50 +1758,13 @@ absl::Status PjRtClient::CrossHostCopyArraysTo(
       // it. Otherwise, call this class's `CrossHostReceiveBuffers` method to
       // use the plugin's `MakeCrossHostReceiveBuffers` API, transmitting the
       // buffer descriptors via the KV store.
-      std::cout << "Launching CrossHostReceiveBuffersInto." << std::endl;
 
-      absl::Status receive_status = pjrt_client_->CrossHostReceiveBuffersInto(
+      // TODO: Add fallback to CrossHostReceiveBuffers / DCN-based transfers if
+      // CrossHostReceiveBuffersInto() is unimplemented.
+      TF_RETURN_IF_ERROR(pjrt_client_->CrossHostReceiveBuffersInto(
           absl::MakeSpan(recv_buffers[next_addressable_dst_buffer]),
-          std::move(src_global_device_ids), transfer_keys);
+          std::move(src_global_device_ids), transfer_keys));
 
-      if (!receive_status.ok() && !absl::IsUnimplemented(receive_status)) {
-        return receive_status;
-      }
-
-      if (absl::IsUnimplemented(receive_status)) {
-        TF_ASSIGN_OR_RETURN(
-            std::vector<std::unique_ptr<PjRtBuffer>> received_buffers,
-            CrossHostReceiveBuffers(recv_shapes, pjrt_device,
-                                    std::move(transfer_keys)));
-
-        // Replace corresponding buffers of dst_arrays. TODO: Modify
-        // CrossHostReceiveBuffers to perform 'true mutation'.
-        if (received_buffers.size() != num_transfers) {
-          return absl::InternalError(
-              "CrossHostReceiveBuffers outputs have unexpected size.");
-        }
-
-        for (std::unique_ptr<PjRtBuffer>& buffer : received_buffers) {
-          buffer->GetReadyFuture().OnReady(on_recv_done);
-        }
-
-        for (int k = 0; k < num_transfers; ++k) {
-          auto* pjrt_dst_array = llvm::dyn_cast<PjRtArray>(dst_arrays[k].get());
-          if (pjrt_dst_array == nullptr) {
-            return absl::InvalidArgumentError(
-                "Unsupported array type for preallocated cross-host receive");
-          }
-          TF_ASSIGN_OR_RETURN(
-              absl::Span<std::shared_ptr<PjRtBuffer>> curr_mutable_pjrt_buffers,
-              pjrt_dst_array->mutable_pjrt_buffers());
-          curr_mutable_pjrt_buffers[next_addressable_dst_buffer] =
-              std::move(received_buffers[k]);
-        }
-      } else {
-        for (PjRtBuffer* buffer : recv_buffers[next_addressable_dst_buffer]) {
-          buffer->GetReadyFuture().OnReady(on_recv_done);
-        }
-      }
       ++next_addressable_dst_buffer;
     }
   }

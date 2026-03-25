@@ -3812,15 +3812,13 @@ bool PjRtCApiBuffer::IsOnCpu() const {
 }
 
 PJRT_Event* PjRtCApiBuffer::GetReadyEvent() {
-  if (readiness_event_ == nullptr) {
-    const PJRT_Api* api = pjrt_c_api();
-    PJRT_Buffer_ReadyEvent_Args args;
-    args.struct_size = PJRT_Buffer_ReadyEvent_Args_STRUCT_SIZE;
-    args.extension_start = nullptr;
-    args.buffer = buffer_.get();
-    pjrt::LogFatalIfPjrtError(api->PJRT_Buffer_ReadyEvent(&args), api);
-    readiness_event_.reset(args.event);
-  }
+  const PJRT_Api* api = pjrt_c_api();
+  PJRT_Buffer_ReadyEvent_Args args;
+  args.struct_size = PJRT_Buffer_ReadyEvent_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.buffer = buffer_.get();
+  pjrt::LogFatalIfPjrtError(api->PJRT_Buffer_ReadyEvent(&args), api);
+  readiness_event_.reset(args.event);
   return readiness_event_.get();
 }
 

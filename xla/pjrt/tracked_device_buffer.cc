@@ -280,20 +280,18 @@ Future<> TrackedDeviceBuffer::GetReadyFuture(PjRtMemorySpace* memory_space) {
   }
   absl::Span<tsl::RCReference<tsl::AsyncValue> const> definition_events_span =
       definition_events;
-  tsl::RunWhenReady(definition_events_span, [promise = std::move(promise),
-                                             definition_events = std::move(
-                                                 definition_events)]() mutable {
-    std::cout << "Setting promises inside TrackedDeviceBuffer::GetReadyFuture"
-              << std::endl;
-
-    for (auto& event : definition_events) {
-      if (const absl::Status* error = event->GetErrorIfPresent()) {
-        promise.Set(*error);
-        return;
-      }
-    }
-    promise.Set();
-  });
+  tsl::RunWhenReady(
+      definition_events_span,
+      [promise = std::move(promise),
+       definition_events = std::move(definition_events)]() mutable {
+        for (auto& event : definition_events) {
+          if (const absl::Status* error = event->GetErrorIfPresent()) {
+            promise.Set(*error);
+            return;
+          }
+        }
+        promise.Set();
+      });
   return future;
 }
 

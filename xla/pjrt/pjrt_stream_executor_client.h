@@ -387,6 +387,10 @@ class PjRtStreamExecutorClient : public CommonPjRtClient {
     return async_work_runner_.get();
   }
 
+  std::shared_ptr<AsyncWorkRunner> shared_async_work_runner() const {
+    return async_work_runner_;
+  }
+
   bool allows_recursion() const override { return false; }
   bool allows_execute_recursion() const override { return true; }
 
@@ -524,7 +528,7 @@ class PjRtStreamExecutorClient : public CommonPjRtClient {
   std::unique_ptr<gpu::GpuExecutableRunOptions> gpu_run_options_;
 
   tsl::thread::ThreadPool compile_thread_pool_;
-  std::unique_ptr<AsyncWorkRunner> async_work_runner_;
+  std::shared_ptr<AsyncWorkRunner> async_work_runner_;
 
   absl::Mutex transpose_mu_;
   TransposePlanCache transpose_cache_ ABSL_GUARDED_BY(transpose_mu_);
