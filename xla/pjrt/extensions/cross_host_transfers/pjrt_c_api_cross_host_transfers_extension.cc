@@ -167,6 +167,40 @@ PJRT_Error* PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers(
   return nullptr;
 }
 
+PJRT_Error* PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto(
+    PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto_Args* args) {
+  PJRT_RETURN_IF_ERROR(ActualStructSizeIsGreaterOrEqual(
+      "PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto_Args",
+      PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto_Args_STRUCT_SIZE,
+      args->struct_size));
+
+  std::vector<xla::PjRtBuffer*> recv_buffers;
+  recv_buffers.reserve(args->num_buffers);
+
+  std::vector<xla::GlobalDeviceId> src_global_device_ids;
+  src_global_device_ids.reserve(args->num_buffers);
+
+  std::vector<xla::CrossHostTransferKey> transfer_keys;
+  transfer_keys.reserve(args->num_buffers);
+
+  for (int i = 0; i < args->num_buffers; ++i) {
+    recv_buffers.push_back(args->recv_buffers[i]->buffer.get());
+    src_global_device_ids.push_back(args->src_global_device_ids[i]);
+    transfer_keys.push_back(args->transfer_keys[i]);
+  }
+
+  PJRT_ASSIGN_OR_RETURN(std::vector<std::unique_ptr<xla::PjRtBuffer>> buffers,
+                        args->client->client->CrossHostReceiveBuffersInto(
+                            absl::MakeSpan(recv_buffers), src_global_device_ids,
+                            std::move(transfer_keys)));
+
+  for (int i = 0; i < buffers.size(); ++i) {
+    args->buffers[i] = new PJRT_Buffer{std::move(buffers[i]), args->client};
+  }
+
+  return nullptr;
+}
+
 PJRT_Error* PJRT_Transfers_PJRT_Client_CrossHostSendBuffers(
     PJRT_Transfers_PJRT_Client_CrossHostSendBuffers_Args* args) {
   std::vector<xla::PjRtBuffer*> buffers;
@@ -388,6 +422,8 @@ PJRT_CrossHostTransfers_Extension CreateCrossHostTransfersExtension(
       PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers,
       /*PJRT_Transfers_PJRT_Client_CrossHostSendBuffers=*/
       PJRT_Transfers_PJRT_Client_CrossHostSendBuffers,
+      /*PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto=*/
+      PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto,
   };
 }
 

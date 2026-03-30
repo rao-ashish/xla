@@ -248,6 +248,10 @@ class PjRtClient final
       std::optional<MemoryKind> memory_kind,
       ArrayCopySemantics semantics) override;
 
+  absl::StatusOr<std::vector<ArrayRef>> CopyArraysInto(
+      absl::Span<ArrayRef> src_arrays, absl::Span<ArrayRef> dst_arrays,
+      ArrayCopySemantics semantics) override;
+
   absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> RemapArrays(
       const RemapPlan& plan, absl::Span<xla::ifrt::ArrayRef> arrays,
       ArrayCopySemantics semantics) override;
@@ -416,6 +420,15 @@ class PjRtClient final
       absl::Span<ArrayRef> arrays, DeviceListRef src_devices,
       DeviceListRef dst_devices, std::optional<MemoryKind> memory_kind,
       ArrayCopySemantics semantics);
+
+  // Copies arrays from source to destination devices when at least one of the
+  // (source, destination) pairs is cross-host. Similar to
+  // CopyArraysForCrossHost, but copies data into preallocated destination
+  // arrays. Donates the provided dst_arrays to the arrays returned as output.
+  absl::StatusOr<std::vector<ArrayRef>> CrossHostCopyArraysInto(
+      absl::Span<ArrayRef> src_arrays, absl::Span<ArrayRef> dst_arrays,
+      DeviceListRef src_devices, DeviceListRef dst_devices,
+      std::optional<MemoryKind> memory_kind, ArrayCopySemantics semantics);
 
   // Extracts receive descriptors from a key-value store and sends buffers to a
   // remote device. This is used when the backend does not implement the

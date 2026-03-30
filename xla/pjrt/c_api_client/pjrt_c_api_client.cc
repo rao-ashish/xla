@@ -1476,6 +1476,51 @@ PjRtCApiClient::CrossHostReceiveBuffers(
                                          temp_buffers.size());
 }
 
+absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
+PjRtCApiClient::CrossHostReceiveBuffersInto(
+    absl::Span<PjRtBuffer*> recv_buffers,
+    absl::Span<const GlobalDeviceId> src_global_device_ids,
+    std::vector<CrossHostTransferKey> transfer_keys) {
+  // Get C API extension.
+  const PJRT_Api* c_api = pjrt_c_api();
+  PJRT_CrossHostTransfers_Extension* extension =
+      FindExtension<PJRT_CrossHostTransfers_Extension>(
+          PJRT_Extension_Type::PJRT_Extension_Type_CrossHostTransfers);
+  if (extension == nullptr) {
+    return absl::UnimplementedError(
+        "CrossHostReceiveBuffersInto is not implemented in this PJRT plugin.");
+  }
+
+  // Form inputs.
+  PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto_Args args;
+  args.struct_size =
+      PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.client = c_client_.get();
+  args.num_buffers = recv_buffers.size();
+
+  std::vector<PJRT_Buffer*> c_buffers;
+  c_buffers.reserve(recv_buffers.size());
+  for (PjRtBuffer* buffer : recv_buffers) {
+    c_buffers.push_back(
+        tensorflow::down_cast<const PjRtCApiBuffer*>(buffer)->c_buffer());
+  }
+  args.recv_buffers = c_buffers.data();
+
+  args.src_global_device_ids = src_global_device_ids.data();
+  args.transfer_keys = transfer_keys.data();
+
+  std::vector<PJRT_Buffer*> temp_buffers(recv_buffers.size());
+  args.buffers = temp_buffers.data();
+
+  RETURN_STATUS_IF_PJRT_ERROR(
+      extension->PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffersInto(&args),
+      c_api);
+
+  return MakePjRtBuffersFromPJRT_Buffers(this, args.buffers,
+                                         temp_buffers.size());
+}
+
 class PjRtCApiAsyncHostToDeviceTransferManager
     : public PjRtClient::AsyncHostToDeviceTransferManager {
  public:

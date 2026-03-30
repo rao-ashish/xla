@@ -234,6 +234,24 @@ class Client : public llvm::RTTIExtends<Client, llvm::RTTIRoot> {
       absl::Span<ArrayRef> arrays, std::optional<DeviceListRef> devices,
       std::optional<MemoryKind> memory_kind, ArrayCopySemantics semantics) = 0;
 
+  // Copies each array of src_arrays into the corresponding array in dst_arrays.
+  // Donates each dst_array to the returned output (the output arrays take
+  // ownership of the underlying device memory).
+  //
+  // This method copies individual buffers of each array into the destination
+  // buffers without altering their physical layout.
+  //
+  // This API should be used only when all src_arrays have the same device list
+  // and memory kind, and similarly for the dst_arrays. Every IFRT
+  // implementation must enforce this by returning an `INVALID_ARGUMENT` error
+  // if `arrays` contains different device lists or memory kinds.
+  virtual absl::StatusOr<std::vector<ArrayRef>> CopyArraysInto(
+      absl::Span<ArrayRef> src_arrays, absl::Span<ArrayRef> dst_arrays,
+      ArrayCopySemantics semantics) {
+    return absl::UnimplementedError(
+        "This IFRT client does not support CopyArraysInto().");
+  }
+
   // Remaps shards across input `Array`s to create new `Array`s based on `plan`.
   // This array remapping is a metadata-only operation that can shuffle or
   // extract shards without changing their per-shard interpretation and causing
