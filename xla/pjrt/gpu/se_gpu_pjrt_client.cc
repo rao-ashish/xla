@@ -615,8 +615,8 @@ StreamExecutorGpuClient::CrossHostTransferBuffers(
     std::vector<std::vector<tsl::RCReference<tsl::AsyncValue>>>
         transfer_dependency_avs,
     absl::Span<const GlobalDeviceId> remote_global_device_ids,
-    std::vector<CrossHostTransferKey> transfer_keys,
-    std::vector<bool> is_sender) {
+    absl::Span<const CrossHostTransferKey> transfer_keys,
+    absl::Span<const bool> is_sender) {
   // Validate arguments.
   int num_transfers = raw_buffers.size();
   if (transfer_dependency_avs.size() != num_transfers ||
@@ -740,7 +740,6 @@ StreamExecutorGpuClient::CrossHostTransferBuffers(
   return output_transfer_events;
 }
 
-// Send functionality for second cross-host transfers API.
 void StreamExecutorGpuClient::ScheduleTransfersOnLocalDevice(
     LocalDeviceState* local_device_state, GlobalDeviceId local_global_device_id,
     tsl::RCReference<PjRtStreamExecutorDeviceEvent> transfer_event,
@@ -825,7 +824,7 @@ void StreamExecutorGpuClient::ScheduleTransfersOnLocalDevice(
             /*executor=*/gpu::GpuCollectives::On(*stream)));
       } else {
         TF_RETURN_IF_ERROR(gpu_communicator->LaunchRecv(
-            /*send_buffer=*/mem->mem(),
+            /*recv_buffer=*/mem->mem(),
             /*dtype=*/U8,
             /*count=*/mem->mem().size(),
             /*peer=*/RankId(0),
@@ -893,6 +892,7 @@ void StreamExecutorGpuClient::ScheduleTransfersOnLocalDevice(
       std::move(execute_transfers_fn));
 }
 
+// Send functionality for second cross-host transfers API.
 absl::StatusOr<std::vector<Future<>>>
 StreamExecutorGpuClient::CrossHostSendBuffers(
     absl::Span<PjRtBuffer* const> buffers,
@@ -985,12 +985,12 @@ StreamExecutorGpuClient::CrossHostSendBuffers(
   }
 
   // Schedule sends.
-  std::vector<bool> is_sender(raw_buffers.size(), true);
+  absl::InlinedVector<bool, 4> is_sender(raw_buffers.size(), true);
   TF_ASSIGN_OR_RETURN(std::vector<PjRtDeviceEventRef> usage_events,
-                      CrossHostTransferBuffers(
-                          std::move(raw_buffers), std::move(definition_events),
-                          std::move(dst_global_device_ids),
-                          std::move(transfer_keys), std::move(is_sender)));
+                      CrossHostTransferBuffers(std::move(raw_buffers),
+                                               std::move(definition_events),
+                                               std::move(dst_global_device_ids),
+                                               transfer_keys, is_sender));
 
   // Populate usage events.
   for (int i = 0; i < buffers.size(); ++i) {
@@ -1143,20 +1143,14 @@ StreamExecutorGpuClient::CrossHostReceiveBuffers(
   }
 
   // Schedule receives.
-  std::vector<bool> is_sender(raw_buffers.size(), false);
+  absl::InlinedVector<bool, 4> is_sender(raw_buffers.size(), false);
   TF_ASSIGN_OR_RETURN(std::vector<PjRtDeviceEventRef> definition_events,
-                      CrossHostTransferBuffers(
-                          std::move(raw_buffers), std::move(allocation_events),
-                          std::move(src_global_device_ids),
-                          std::move(transfer_keys), std::move(is_sender)));
+                      CrossHostTransferBuffers(std::move(raw_buffers),
+                                               std::move(allocation_events),
+                                               std::move(src_global_device_ids),
+                                               transfer_keys, is_sender));
 
-  if (definition_events.size() != shapes.size()) {
-    return absl::InternalError(absl::StrFormat(
-        "CrossHostReceiveBuffers: Definition events returned by "
-        "CrossHostTransferBuffers should have the same size as the number of "
-        "transfers (%d) but had size %d.",
-        shapes.size(), definition_events.size()));
-  }
+  // Populate definition events.
   definition_event_promise->Set(std::move(definition_events[0]));
 
   return buffers;

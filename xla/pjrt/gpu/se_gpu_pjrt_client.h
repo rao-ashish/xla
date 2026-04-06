@@ -158,8 +158,8 @@ class StreamExecutorGpuClient : public xla::PjRtStreamExecutorClient {
       std::vector<std::vector<tsl::RCReference<tsl::AsyncValue>>>
           transfer_dependency_avs,
       absl::Span<const GlobalDeviceId> remote_global_device_ids,
-      std::vector<CrossHostTransferKey> transfer_keys,
-      std::vector<bool> is_sender);
+      absl::Span<const CrossHostTransferKey> transfer_keys,
+      absl::Span<const bool> is_sender);
 
   absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
   CrossHostReceiveBuffers(
