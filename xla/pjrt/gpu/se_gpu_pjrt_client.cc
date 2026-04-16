@@ -700,7 +700,7 @@ StreamExecutorGpuClient::CrossHostSendBuffers(
                 [&](tsl::RCReference<CommonPjRtRawBuffer> buf_raw_buffer,
                     std::vector<tsl::RCReference<tsl::AsyncValue>>
                         buf_definition_events) mutable
-                    -> absl::StatusOr<PjRtDeviceEventRef> {
+                -> absl::StatusOr<PjRtDeviceEventRef> {
                   // Keep raw_buffer alive until the usage_event completes,
                   // preventing the allocation from being freed while the
                   // send is in-flight.
@@ -809,13 +809,14 @@ StreamExecutorGpuClient::CrossHostTransferBuffers(
 
     // Get the local_device_state and use it to schedule transfers. Fail
     // transfers early if we cannot get the local_device_state.
-    absl::StatusOr<LocalDeviceState*> local_device_state =
+    absl::StatusOr<LocalDeviceState*> maybe_local_device_state =
         tensorflow::down_cast<PjRtStreamExecutorDevice*>(device)
             ->GetLocalDeviceState();
-    if (!local_device_state.ok()) {
-      SetEventAsError(transfer_event, local_device_state.status());
+    if (!maybe_local_device_state.ok()) {
+      SetEventAsError(transfer_event, maybe_local_device_state.status());
       continue;
     }
+    LocalDeviceState* local_device_state = *maybe_local_device_state;
 
     // Launch ScheduleTransfersOnLocalDevice on either the async dispatch thread
     // of the calling thread.
