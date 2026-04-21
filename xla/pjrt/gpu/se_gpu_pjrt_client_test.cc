@@ -3478,6 +3478,41 @@ absl::Status SuccessfulCrossHostSendReceiveTestBody(bool is_sender,
   return absl::OkStatus();
 }
 
+TEST(StreamExecutorGpuClientTest, FailedCrossHostTransferSrcAndDstAddressable) {
+  TF_ASSERT_OK_AND_ASSIGN(auto pjrt_client,
+                          GetStreamExecutorGpuClient(DefaultOptions()));
+  auto* client =
+      tensorflow::down_cast<PjRtStreamExecutorClient*>(pjrt_client.get());
+  auto* memory_space = client->memory_spaces()[0];
+  auto literal = LiteralUtil::CreateR1<float>({41.0f, 42.0f, 43.0f, 44.0f});
+  TF_ASSERT_OK_AND_ASSIGN(
+      Shape device_shape,
+      client->MakeDefaultShapeForMemorySpace(memory_space, literal.shape(),
+                                             /*layout=*/nullptr));
+  TF_ASSERT_OK_AND_ASSIGN(
+      int64_t on_device_bytes_count,
+      client->GetOnDeviceBytesCount(memory_space, device_shape));
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto raw_buffer,
+      client->AllocateRawBuffer(memory_space, on_device_bytes_count,
+                                /*retry_on_oom=*/true,
+                                /*allocate_after=*/{}));
+
+  EXPECT_THAT(
+      pjrt_client
+          ->CrossHostTransferBuffers(
+              /*transfer_dependencies=*/{},
+              /*transfer_specs=*/{PjRtClient::CrossHostTransferSpec{
+                  GlobalDeviceId(0), GlobalDeviceId(1), std::move(raw_buffer)}})
+          .status(),
+      absl_testing::StatusIs(
+          absl::StatusCode::kInvalidArgument,
+          ::testing::StrEq(
+              "CrossHostTransferBuffers: remote device for buffer 0 is "
+              "addressable (global device id 1), but cross-host transfers must "
+              "be between an addressable and a non-addressable device.")));
+}
+
 struct SuccessfulCrossHostTransferTestParam {
   int num_rank_0_to_rank_1;
   int num_rank_1_to_rank_0;
