@@ -44,7 +44,6 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/backends/cpu/target_machine_options.h"
 #include "xla/backends/gpu/collectives/gpu_clique.h"
 #include "xla/backends/gpu/collectives/gpu_clique_key.h"
@@ -117,6 +116,7 @@ limitations under the License.
 #include "xla/tsl/framework/allocator.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/status_macros.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/protobuf/coordination_service.pb.h"
 #include "xla/xla_data.pb.h"
@@ -600,17 +600,19 @@ void FulfillDeviceEvent(PjRtStreamExecutorClient* client,
   }
 }
 
-absl::Status WaitForAsyncValueRefsOnStream(
-    absl::Span<const tsl::RCReference<tsl::AsyncValue>> async_value_refs,
+absl::Status WaitForDeviceEventRefsOnStream(
+    absl::Span<const PjRtDeviceEventRef> device_event_refs,
     se::Stream* stream) {
-  for (const auto& event : async_value_refs) {
-    if (event->IsType<BufferSequencingEvent>()) {
-      tsl::AsyncValueRef<BufferSequencingEvent> event_ref(event);
-      event_ref->WaitForEventOnStream(stream);
-    } else {
-      tsl::BlockUntilReady(event.get());
+  for (const auto& event : device_event_refs) {
+    tsl::AsyncValue* av = event.async_value();
+    if (!av->IsType<BufferSequencingEvent>()) {
+      return InvalidArgument(
+          "WaitForDeviceEventRefsOnStream assumes that all input "
+          "PjRtDeviceEventRefs are backed by BufferSequencingEventRefs.");
     }
-    if (auto* status = event->GetErrorIfPresent(); status != nullptr) {
+    tsl::AsyncValueRef<BufferSequencingEvent> event_ref(tsl::FormRef(av));
+    event_ref->WaitForEventOnStream(stream);
+    if (auto* status = av->GetErrorIfPresent(); status != nullptr) {
       return *status;
     }
   }
@@ -673,7 +675,7 @@ StreamExecutorGpuClient::CrossHostSendBuffers(
   std::vector<tsl::RCReference<PjRtRawBuffer>> raw_buffers;
   raw_buffers.reserve(buffers.size());
 
-  std::vector<tsl::RCReference<tsl::AsyncValue>> transfer_dependency_avs;
+  std::vector<PjRtDeviceEventRef> transfer_dependencies;
   std::vector<tsl::RCReference<PjRtDeviceEventPromise>> usage_event_promises;
   usage_event_promises.reserve(buffers.size());
 
@@ -699,17 +701,24 @@ StreamExecutorGpuClient::CrossHostSendBuffers(
             ->AcquireScopedRawBuffer(
                 [&](tsl::RCReference<CommonPjRtRawBuffer> buf_raw_buffer,
                     std::vector<tsl::RCReference<tsl::AsyncValue>>
-                        buf_definition_events) mutable
+                        buf_definition_avs) mutable
                 -> absl::StatusOr<PjRtDeviceEventRef> {
                   // Keep raw_buffer alive until the usage_event completes,
                   // preventing the allocation from being freed while the
                   // send is in-flight.
                   usage_event.AndThen([buf_raw_buffer]() {});
                   raw_buffers.push_back(std::move(buf_raw_buffer));
-                  for (tsl::RCReference<tsl::AsyncValue>& definition_event :
-                       buf_definition_events) {
-                    transfer_dependency_avs.push_back(
-                        std::move(definition_event));
+                  for (tsl::RCReference<tsl::AsyncValue>& definition_av :
+                       buf_definition_avs) {
+                    if (!definition_av->IsType<BufferSequencingEvent>()) {
+                      return absl::InternalError(
+                          "CrossHostSendBuffers expected buffer definition "
+                          "events to be of type BufferSequencingEvent");
+                    }
+                    tsl::AsyncValueRef<BufferSequencingEvent> typed_dependency(
+                        std::move(definition_av));
+                    transfer_dependencies.push_back(
+                        PjRtDeviceEventRef(std::move(typed_dependency)));
                   }
                   return PjRtDeviceEventRef(usage_event);
                 },
@@ -726,10 +735,9 @@ StreamExecutorGpuClient::CrossHostSendBuffers(
   }
 
   // Schedule sends.
-  TF_ASSIGN_OR_RETURN(
-      std::vector<PjRtDeviceEventRef> usage_events,
-      CrossHostTransferBuffers(std::move(transfer_dependency_avs),
-                               std::move(transfer_specs)));
+  TF_ASSIGN_OR_RETURN(std::vector<PjRtDeviceEventRef> usage_events,
+                      CrossHostTransferBuffers(std::move(transfer_dependencies),
+                                               std::move(transfer_specs)));
 
   // Populate usage events.
   for (int i = 0; i < buffers.size(); ++i) {
@@ -741,7 +749,7 @@ StreamExecutorGpuClient::CrossHostSendBuffers(
 
 absl::StatusOr<std::vector<PjRtDeviceEventRef>>
 StreamExecutorGpuClient::CrossHostTransferBuffers(
-    std::vector<tsl::RCReference<tsl::AsyncValue>> transfer_dependency_avs,
+    std::vector<PjRtDeviceEventRef> transfer_dependencies,
     std::vector<CrossHostTransferSpec> transfer_specs) {
   // Validate arguments.
   for (int i = 0; i < transfer_specs.size(); ++i) {
@@ -823,18 +831,18 @@ StreamExecutorGpuClient::CrossHostTransferBuffers(
       (*local_device_state)
           ->async_dispatch_thread()
           ->Schedule(tsl::WithCurrentContext(
-              [this, local_device_state, device_id, transfer_dependency_avs,
+              [this, local_device_state, device_id, transfer_dependencies,
                curr_transfer_specs = std::move(curr_transfer_specs),
                transfer_event = std::move(transfer_event)]() mutable {
-                ScheduleTransfersOnLocalDevice(
-                    *local_device_state, device_id, std::move(transfer_event),
-                    std::move(transfer_dependency_avs),
-                    std::move(curr_transfer_specs));
+                ScheduleTransfersOnLocalDevice(*local_device_state, device_id,
+                                               std::move(transfer_event),
+                                               std::move(transfer_dependencies),
+                                               std::move(curr_transfer_specs));
               }));
     } else {
       ScheduleTransfersOnLocalDevice(
           *local_device_state, device_id, std::move(transfer_event),
-          transfer_dependency_avs, std::move(curr_transfer_specs));
+          transfer_dependencies, std::move(curr_transfer_specs));
     }
   }
 
@@ -844,7 +852,7 @@ StreamExecutorGpuClient::CrossHostTransferBuffers(
 void StreamExecutorGpuClient::ScheduleTransfersOnLocalDevice(
     LocalDeviceState* local_device_state, GlobalDeviceId device_id,
     tsl::AsyncValueRef<BufferSequencingEvent> transfer_event,
-    std::vector<tsl::RCReference<tsl::AsyncValue>> transfer_dependency_avs,
+    std::vector<PjRtDeviceEventRef> transfer_dependencies,
     std::vector<CrossHostTransferSpec> transfer_specs) {
   tsl::profiler::TraceMe trace([&] {
     return tsl::profiler::TraceMeEncode(
@@ -923,13 +931,13 @@ void StreamExecutorGpuClient::ScheduleTransfersOnLocalDevice(
   // Form the closure to schedule on the device's execute thread.
   auto execute_transfers_fn =
       [this, local_device_state, stream,
-       transfer_dependency_avs = std::move(transfer_dependency_avs),
+       transfer_dependencies = std::move(transfer_dependencies),
        prepared_transfers = std::move(prepared_transfers),
        launch_transfer_group = std::move(launch_transfer_group),
        transfer_event = std::move(transfer_event)]() mutable {
         // Wait for transfer dependencies.
         if (auto status =
-                WaitForAsyncValueRefsOnStream(transfer_dependency_avs, stream);
+                WaitForDeviceEventRefsOnStream(transfer_dependencies, stream);
             !status.ok()) {
           FulfillDeviceEvent(this, local_device_state, stream, transfer_event,
                              status);
@@ -1085,7 +1093,7 @@ StreamExecutorGpuClient::CrossHostReceiveBuffers(
 
   // Build output receive buffers, collect their allocation events, and form
   // their transfer specs.
-  std::vector<tsl::RCReference<tsl::AsyncValue>> allocation_events;
+  std::vector<PjRtDeviceEventRef> allocation_events;
   std::vector<CrossHostTransferSpec> transfer_specs;
   transfer_specs.reserve(shapes.size());
   std::vector<std::unique_ptr<PjRtBuffer>> buffers;
@@ -1121,7 +1129,8 @@ StreamExecutorGpuClient::CrossHostReceiveBuffers(
             ->GetDefinitionEvent(async_work_runner(),
                                  /*nullptr_if_past=*/true));
     if (allocation_event) {
-      allocation_events.push_back(std::move(allocation_event));
+      allocation_events.push_back(
+          PjRtDeviceEventRef(std::move(allocation_event)));
     }
     transfer_specs.push_back(CrossHostTransferSpec{src_global_device_ids[i],
                                                    device->global_device_id(),
