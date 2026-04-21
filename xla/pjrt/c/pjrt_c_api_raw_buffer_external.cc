@@ -28,7 +28,6 @@ limitations under the License.
 #include "xla/pjrt/c/pjrt_c_api_helpers.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_status_utils.h"
-#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/raw_buffer.h"
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/platform/statusor.h"
@@ -149,8 +148,7 @@ PjRtCApiRawBuffer::~PjRtCApiRawBuffer() {
 }
 
 PjRtMemorySpace* PjRtCApiRawBuffer::memory_space() const {
-  return client_->GetCppMemory(
-      pjrt::PjRtCApiRawBuffer_GetMemorySpace(c_api_, c_extension_, c_buffer_));
+  return memory_space_;
 }
 
 void* PjRtCApiRawBuffer::GetHostPointer() const {
@@ -174,28 +172,5 @@ Future<> PjRtCApiRawBuffer::CopyRawDeviceToHost(void* dst, int64_t offset,
   return pjrt::PjRtCApiRawBuffer_CopyRawDeviceToHost(
       c_api_, c_extension_, c_buffer_, dst, offset, transfer_size);
 }
-
-static std::optional<absl::StatusOr<tsl::RCReference<PjRtRawBuffer>>>
-PjRtCApiBuffer_CreateRawAliasOfBuffer_Factory(PjRtBuffer* buffer) {
-  if (auto* c_api_buffer = dynamic_cast<xla::PjRtCApiBuffer*>(buffer)) {
-    auto* c_api = c_api_buffer->pjrt_c_api();
-    PJRT_RawBuffer_Extension* extension =
-        pjrt::FindExtension<PJRT_RawBuffer_Extension>(
-            c_api, PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
-    if (!extension) {
-      return absl::UnimplementedError(
-          "RawBuffer extension not implemented in this PJRT plugin.");
-    }
-    TF_ASSIGN_OR_RETURN(PJRT_RawBuffer * raw_buffer,
-                        pjrt::PjRtCApiBuffer_CreateRawAliasOfBuffer(
-                            c_api, extension, c_api_buffer->c_buffer()));
-    return tsl::MakeRef<PjRtCApiRawBuffer>(
-        raw_buffer, absl::down_cast<PjRtCApiClient*>(c_api_buffer->client()),
-        c_api, extension);
-  }
-  return std::nullopt;
-}
-
-REGISTER_PJRT_RAW_BUFFER_FACTORY(PjRtCApiBuffer_CreateRawAliasOfBuffer_Factory);
 
 }  // namespace xla

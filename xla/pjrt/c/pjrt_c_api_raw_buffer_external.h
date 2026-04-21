@@ -20,7 +20,6 @@ limitations under the License.
 #include "xla/future.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
-#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/raw_buffer.h"
 
 namespace pjrt {
@@ -59,11 +58,11 @@ namespace xla {
 
 class PjRtCApiRawBuffer : public PjRtRawBuffer {
  public:
-  PjRtCApiRawBuffer(PJRT_RawBuffer* c_buffer, PjRtCApiClient* client,
+  PjRtCApiRawBuffer(PJRT_RawBuffer* c_buffer, PjRtMemorySpace* memory_space,
                     const PJRT_Api* c_api,
                     const PJRT_RawBuffer_Extension* c_extension)
       : c_buffer_(c_buffer),
-        client_(client),
+        memory_space_(memory_space),
         c_api_(c_api),
         c_extension_(c_extension) {}
   ~PjRtCApiRawBuffer() override;
@@ -79,7 +78,7 @@ class PjRtCApiRawBuffer : public PjRtRawBuffer {
 
  private:
   PJRT_RawBuffer* c_buffer_;
-  PjRtCApiClient* client_;
+  PjRtMemorySpace* memory_space_;
   const PJRT_Api* c_api_;
   const PJRT_RawBuffer_Extension* c_extension_;
 };

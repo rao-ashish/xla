@@ -5053,4 +5053,32 @@ PjRtPlatformId PjRtCApiExecutableAbiVersion::platform_id() const {
   return args.platform_id;
 }
 
+static std::optional<absl::StatusOr<tsl::RCReference<PjRtRawBuffer>>>
+PjRtCApiBuffer_CreateRawAliasOfBuffer_Factory(PjRtBuffer* buffer) {
+  if (auto* c_api_buffer = dynamic_cast<xla::PjRtCApiBuffer*>(buffer)) {
+    auto* c_api = c_api_buffer->pjrt_c_api();
+    PJRT_RawBuffer_Extension* extension =
+        pjrt::FindExtension<PJRT_RawBuffer_Extension>(
+            c_api, PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
+    if (!extension) {
+      return absl::UnimplementedError(
+          "RawBuffer extension not implemented in this PJRT plugin.");
+    }
+    TF_ASSIGN_OR_RETURN(PJRT_RawBuffer * raw_buffer,
+                        pjrt::PjRtCApiBuffer_CreateRawAliasOfBuffer(
+                            c_api, extension, c_api_buffer->c_buffer()));
+
+    PjRtCApiClient* client =
+        absl::down_cast<PjRtCApiClient*>(c_api_buffer->client());
+    PjRtMemorySpace* memory_space = client->GetCppMemory(
+        pjrt::PjRtCApiRawBuffer_GetMemorySpace(c_api, extension, raw_buffer));
+
+    return tsl::MakeRef<PjRtCApiRawBuffer>(raw_buffer, memory_space, c_api,
+                                           extension);
+  }
+  return std::nullopt;
+}
+
+REGISTER_PJRT_RAW_BUFFER_FACTORY(PjRtCApiBuffer_CreateRawAliasOfBuffer_Factory);
+
 }  // namespace xla
