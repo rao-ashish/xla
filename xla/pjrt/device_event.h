@@ -22,6 +22,7 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "c/pjrt_c_api_device_event.h"
 #include "xla/future.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_device_event.h"
@@ -83,6 +84,20 @@ class PjRtDeviceEventRef {
 
   PjRtDeviceEventRef(PjRtDeviceEventRef&& other) noexcept
       : vtable_(other.vtable_), device_event_(other.ReleaseRawRef()) {}
+
+  PjRtDeviceEventRef(const PJRT_DeviceEvent& other)
+      : vtable_(other.vtable), device_event_(other.device_event) {
+    vtable_->inc_ref(device_event_);
+  }
+
+  PjRtDeviceEventRef(PJRT_DeviceEvent&& other) noexcept
+      : vtable_(other.vtable), device_event_(other.device_event) {}
+
+  PJRT_DeviceEvent ToCApiDeviceEvent() {
+    vtable_->inc_ref(device_event_);
+    return PJRT_DeviceEvent{
+        const_cast<PJRT_DeviceEvent_FunctionTable*>(vtable_), device_event_};
+  }
 
   PjRtDeviceEventRef& operator=(const PjRtDeviceEventRef& other) {
     if (this != &other) {

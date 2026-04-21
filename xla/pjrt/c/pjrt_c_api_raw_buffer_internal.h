@@ -18,6 +18,12 @@ limitations under the License.
 
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
+#include "xla/pjrt/raw_buffer.h"
+
+struct PJRT_RawBuffer {
+  tsl::RCReference<xla::PjRtRawBuffer> buffer;
+  PJRT_Client* client;
+};
 
 namespace pjrt {
 
