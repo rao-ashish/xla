@@ -481,6 +481,10 @@ class PjRtCApiClient : public PjRtClient {
       absl::Span<const GlobalDeviceId> src_global_device_ids,
       std::vector<CrossHostTransferKey> transfer_keys) override;
 
+  absl::StatusOr<std::vector<PjRtDeviceEventRef>> CrossHostTransferBuffers(
+      std::vector<PjRtDeviceEventRef> transfer_dependencies,
+      std::vector<CrossHostTransferSpec> transfer_specs) override;
+
   absl::Status DmaMap(void* data, size_t size) override;
 
   absl::Status DmaUnmap(void* data) override;

@@ -86,6 +86,7 @@ cc_library(
         "//xla/pjrt/c:pjrt_c_api_hdrs",
         "//xla/pjrt/c:pjrt_c_api_helpers",
         "//xla/pjrt/c:pjrt_c_api_layouts_extension_hdrs",
+        "//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
         "//xla/pjrt/c:pjrt_c_api_memory_descriptions_extension_hdrs",
         "//xla/pjrt/c:pjrt_c_api_phase_compile_extension_hdrs",
         "//xla/pjrt/c:pjrt_c_api_profiler_extension_hdrs",

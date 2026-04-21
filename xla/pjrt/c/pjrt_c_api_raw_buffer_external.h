@@ -75,6 +75,7 @@ class PjRtCApiRawBuffer : public PjRtRawBuffer {
                                int64_t transfer_size) override;
   Future<> CopyRawDeviceToHost(void* dst, int64_t offset,
                                int64_t transfer_size) override;
+  PJRT_RawBuffer* c_buffer() const { return c_buffer_; }
 
  private:
   PJRT_RawBuffer* c_buffer_;

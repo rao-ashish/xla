@@ -200,11 +200,13 @@ typedef struct PJRT_CrossHostTransfers_Extension {
       PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers;
   PJRT_Transfers_PJRT_Client_CrossHostSendBuffers*
       PJRT_Transfers_PJRT_Client_CrossHostSendBuffers;
+  PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers*
+      PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers;
 } PJRT_CrossHostTransfers_Extension;
 // NOLINTEND
 
 PJRT_DEFINE_STRUCT_TRAITS(PJRT_CrossHostTransfers_Extension,
-                          PJRT_Transfers_PJRT_Client_CrossHostSendBuffers);
+                          PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers);
 
 #ifdef __cplusplus
 }
