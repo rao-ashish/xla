@@ -349,6 +349,7 @@ cc_library(
     visibility = internal_visibility(["//xla:friends"]),
     deps = [
         ":host_memory_allocator",
+        ":device_event",
         ":maybe_owning_mlir_module",
         ":pjrt_abi_version",
         ":pjrt_common",

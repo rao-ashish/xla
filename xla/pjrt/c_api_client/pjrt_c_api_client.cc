@@ -62,6 +62,7 @@ limitations under the License.
 #include "xla/pjrt/c/pjrt_c_api_memory_descriptions_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_phase_compile_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_profiler_extension.h"
+#include "xla/pjrt/c/pjrt_c_api_raw_buffer_external.h"
 #include "xla/pjrt/c/pjrt_c_api_shardings_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_status_utils.h"
 #include "xla/pjrt/c/pjrt_c_api_stream_extension.h"
@@ -1494,6 +1495,81 @@ PjRtCApiClient::CrossHostReceiveBuffers(
 
   return MakePjRtBuffersFromPJRT_Buffers(this, args.buffers,
                                          temp_buffers.size());
+}
+
+absl::StatusOr<std::vector<PjRtDeviceEventRef>>
+PjRtCApiClient::CrossHostTransferBuffers(
+    std::vector<PjRtDeviceEventRef> transfer_dependencies,
+    std::vector<CrossHostTransferSpec> transfer_specs) {
+  // Get C API extension.
+  const PJRT_Api* c_api = pjrt_c_api();
+  PJRT_CrossHostTransfers_Extension* cross_host_transfers_extension =
+      FindExtension<PJRT_CrossHostTransfers_Extension>(
+          PJRT_Extension_Type::PJRT_Extension_Type_CrossHostTransfers);
+  PJRT_RawBuffer_Extension* raw_buffer_extension =
+      FindExtension<PJRT_RawBuffer_Extension>(
+          PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
+  if (cross_host_transfers_extension == nullptr ||
+      raw_buffer_extension == nullptr) {
+    return absl::UnimplementedError(
+        "CrossHostTransferBuffers is not implemented in this PJRT plugin.");
+  }
+
+  // Represent transfer_dependencies as std::vector<PJRT_DeviceEvent>.
+  std::vector<PJRT_DeviceEvent> c_transfer_dependencies;
+  c_transfer_dependencies.reserve(transfer_dependencies.size());
+  std::vector<PJRT_DeviceEvent*> c_transfer_dependency_ptrs;
+  c_transfer_dependency_ptrs.reserve(transfer_dependencies.size());
+  for (PjRtDeviceEventRef& transfer_dependency : transfer_dependencies) {
+    c_transfer_dependencies.push_back(transfer_dependency.ToCApiDeviceEvent());
+    c_transfer_dependency_ptrs.push_back(&c_transfer_dependencies.back());
+  }
+
+  // Extract src / dst device ids and raw buffers.
+  std::vector<GlobalDeviceId> src_global_device_ids;
+  src_global_device_ids.reserve(transfer_specs.size());
+  std::vector<GlobalDeviceId> dst_global_device_ids;
+  dst_global_device_ids.reserve(transfer_specs.size());
+  std::vector<PJRT_RawBuffer*> raw_buffers;
+  raw_buffers.reserve(transfer_specs.size());
+  for (CrossHostTransferSpec& transfer_spec : transfer_specs) {
+    src_global_device_ids.push_back(transfer_spec.src_global_device_id);
+    dst_global_device_ids.push_back(transfer_spec.dst_global_device_id);
+    raw_buffers.push_back(tensorflow::down_cast<const PjRtCApiRawBuffer*>(
+                              transfer_spec.raw_buffer.get())
+                              ->c_buffer());
+  }
+
+  // Form inputs.
+  PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers_Args args;
+  args.struct_size =
+      PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.client = c_client_.get();
+  args.num_dependencies = transfer_dependencies.size();
+  args.transfer_dependencies = c_transfer_dependency_ptrs.data();
+  args.num_transfers = transfer_specs.size();
+  args.src_global_device_ids = src_global_device_ids.data();
+  args.dst_global_device_ids = dst_global_device_ids.data();
+  args.raw_buffers = raw_buffers.data();
+  std::vector<PJRT_DeviceEvent*> temp_device_events(transfer_specs.size());
+  args.transfer_events = temp_device_events.data();
+
+  // Call into C API CrossHostTransferBuffers.
+  RETURN_STATUS_IF_PJRT_ERROR(
+      cross_host_transfers_extension
+          ->PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers(&args),
+      c_api);
+
+  // Form output transfer events.
+  std::vector<PjRtDeviceEventRef> transfer_events;
+  transfer_events.reserve(transfer_specs.size());
+  for (int i = 0; i < transfer_specs.size(); ++i) {
+    transfer_events.push_back(
+        PjRtDeviceEventRef(std::move(*args.transfer_events[i])));
+  }
+
+  return transfer_events;
 }
 
 class PjRtCApiAsyncHostToDeviceTransferManager
@@ -4976,5 +5052,33 @@ PjRtPlatformId PjRtCApiExecutableAbiVersion::platform_id() const {
       extension_->executable_abi_version_platform_id(&args), c_api_);
   return args.platform_id;
 }
+
+static std::optional<absl::StatusOr<tsl::RCReference<PjRtRawBuffer>>>
+PjRtCApiBuffer_CreateRawAliasOfBuffer_Factory(PjRtBuffer* buffer) {
+  if (auto* c_api_buffer = dynamic_cast<xla::PjRtCApiBuffer*>(buffer)) {
+    auto* c_api = c_api_buffer->pjrt_c_api();
+    PJRT_RawBuffer_Extension* extension =
+        pjrt::FindExtension<PJRT_RawBuffer_Extension>(
+            c_api, PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
+    if (!extension) {
+      return absl::UnimplementedError(
+          "RawBuffer extension not implemented in this PJRT plugin.");
+    }
+    TF_ASSIGN_OR_RETURN(PJRT_RawBuffer * raw_buffer,
+                        pjrt::PjRtCApiBuffer_CreateRawAliasOfBuffer(
+                            c_api, extension, c_api_buffer->c_buffer()));
+
+    PjRtCApiClient* client =
+        absl::down_cast<PjRtCApiClient*>(c_api_buffer->client());
+    PjRtMemorySpace* memory_space = client->GetCppMemory(
+        pjrt::PjRtCApiRawBuffer_GetMemorySpace(c_api, extension, raw_buffer));
+
+    return tsl::MakeRef<PjRtCApiRawBuffer>(raw_buffer, memory_space, c_api,
+                                           extension);
+  }
+  return std::nullopt;
+}
+
+REGISTER_PJRT_RAW_BUFFER_FACTORY(PjRtCApiBuffer_CreateRawAliasOfBuffer_Factory);
 
 }  // namespace xla

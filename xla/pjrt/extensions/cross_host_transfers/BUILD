@@ -23,6 +23,8 @@ cc_library(
         "//xla/pjrt/c:pjrt_c_api_helpers",
         "//xla/pjrt/c:pjrt_c_api_status_utils",
         "//xla/pjrt/c:pjrt_c_api_wrapper_impl",
+        "//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
+        "//xla/pjrt/c:pjrt_c_api_raw_buffer_internal",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status:statusor",

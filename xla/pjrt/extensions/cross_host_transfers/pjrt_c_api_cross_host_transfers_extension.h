@@ -20,6 +20,8 @@ limitations under the License.
 #include <cstdint>
 
 #include "xla/pjrt/c/pjrt_c_api.h"
+#include "xla/pjrt/c/pjrt_c_api_device_event.h"
+#include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_common.h"
 
@@ -35,11 +37,35 @@ extern "C" {
 // CrossHostSendBuffers and CrossHostReceiveBuffers. These methods allow PjRt
 // clients to implement various optimizations for cross-host transfers.
 
-#define PJRT_API_CROSS_HOST_TRANSFERS_EXTENSION_VERSION 6
+#define PJRT_API_CROSS_HOST_TRANSFERS_EXTENSION_VERSION 7
 // Version 6 adds descriptor_destructor callback to CopyToRemoteDevice to fix
 // memory management across C API boundary.
 
+// Version 7 adds CrossHostTransferBuffers to enable data transfers into / from
+// raw buffers and batching sends and receives executed on the same device.
+
 // ---------------------------------- Methods ----------------------------------
+
+struct PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers_Args {
+  size_t struct_size;
+  PJRT_Extension_Base* extension_start;
+  PJRT_Client* client;
+
+  size_t num_dependencies;
+  PJRT_DeviceEvent** transfer_dependencies;  // Has size num_dependencies.
+
+  size_t num_transfers;
+  const xla::GlobalDeviceId* src_global_device_ids;  // Has size num_transfers.
+  const xla::GlobalDeviceId* dst_global_device_ids;  // Has size num_transfers.
+  PJRT_RawBuffer** raw_buffers;                      // Has size num_transfers.
+  PJRT_DeviceEvent** transfer_events;  // Output; has size num_transfers.
+};
+
+PJRT_DEFINE_STRUCT_TRAITS(
+    PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers_Args, transfer_events);
+
+typedef PJRT_Error* PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers(
+    PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers_Args* args);
 
 // Structs and methods prefixed with
 // PJRT_Transfers_PJRT_Client_CrossHost{Send,Receive}Buffers correspond to the
@@ -51,7 +77,7 @@ struct PJRT_Transfers_PJRT_Client_CrossHostSendBuffers_Args {
   size_t num_buffers;
   PJRT_Buffer** buffers;
   const xla::GlobalDeviceId* dst_global_device_ids;  // Has size num_buffers.
-  const xla::CrossHostTransferKey* transfer_keys;  // Has size num_buffers.
+  const xla::CrossHostTransferKey* transfer_keys;    // Has size num_buffers.
   PJRT_Event** send_events;  // Output; has size num_buffers.
 };
 
@@ -71,8 +97,8 @@ struct PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers_Args {
   PJRT_Buffer_Type* element_types;
   PJRT_Buffer_MemoryLayout** layouts;
   PJRT_Device* device;
-  const xla::GlobalDeviceId* src_global_device_ids;      // Has size num_shapes.
-  const xla::CrossHostTransferKey* transfer_keys;        // Has size num_shapes.
+  const xla::GlobalDeviceId* src_global_device_ids;  // Has size num_shapes.
+  const xla::CrossHostTransferKey* transfer_keys;    // Has size num_shapes.
   PJRT_Buffer** buffers;  // Output; has size num_shapes.
 };
 
@@ -174,11 +200,13 @@ typedef struct PJRT_CrossHostTransfers_Extension {
       PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers;
   PJRT_Transfers_PJRT_Client_CrossHostSendBuffers*
       PJRT_Transfers_PJRT_Client_CrossHostSendBuffers;
+  PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers*
+      PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers;
 } PJRT_CrossHostTransfers_Extension;
 // NOLINTEND
 
 PJRT_DEFINE_STRUCT_TRAITS(PJRT_CrossHostTransfers_Extension,
-                          PJRT_Transfers_PJRT_Client_CrossHostSendBuffers);
+                          PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers);
 
 #ifdef __cplusplus
 }

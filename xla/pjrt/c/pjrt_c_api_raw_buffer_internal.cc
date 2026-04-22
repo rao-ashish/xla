@@ -25,11 +25,6 @@ limitations under the License.
 #include "xla/pjrt/raw_buffer.h"
 #include "xla/tsl/concurrency/ref_count.h"
 
-struct PJRT_RawBuffer {
-  tsl::RCReference<xla::PjRtRawBuffer> buffer;
-  PJRT_Client* client;
-};
-
 namespace pjrt {
 
 PJRT_Error* PJRT_RawBuffer_CreateRawAliasOfBuffer(

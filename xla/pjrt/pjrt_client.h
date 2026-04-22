@@ -45,6 +45,7 @@ limitations under the License.
 #include "xla/hlo/builder/xla_computation.h"
 #include "xla/layout.h"
 #include "xla/literal.h"
+#include "xla/pjrt/device_event.h"
 #include "xla/pjrt/distributed/coordination/coordination_service.pb.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
 #include "xla/pjrt/host_memory_allocator.h"
@@ -76,6 +77,7 @@ class PjRtClient;
 class PjRtDevice;
 class PjRtLoadedExecutable;
 class PjRtExecutableForwarder;
+class PjRtRawBuffer;
 struct CompileOptions;
 
 typedef absl::AnyInvocable<absl::Status(absl::StatusOr<PjRtBuffer*>)>
@@ -1065,6 +1067,25 @@ class PjRtClient {
       std::vector<CrossHostTransferKey> transfer_keys) {
     return absl::UnimplementedError(
         "Cross-host data transfers are not supported.");
+  }
+
+  // Similar to CrossHostSendBuffers / CrossHostReceiveBuffers, but uses
+  // PjRtRawBuffer instead of PjRtBuffer. Takes in a vector of transfer
+  // dependencies and transfer specs, and launches the data transfers specified
+  // by the transfer specs so that they occur after all transfer dependencies
+  // complete.
+  struct CrossHostTransferSpec {
+    GlobalDeviceId src_global_device_id;
+    GlobalDeviceId dst_global_device_id;
+    tsl::RCReference<PjRtRawBuffer> raw_buffer;
+  };
+
+  virtual absl::StatusOr<std::vector<PjRtDeviceEventRef>>
+  CrossHostTransferBuffers(
+      std::vector<PjRtDeviceEventRef> transfer_dependencies,
+      std::vector<CrossHostTransferSpec> transfer_specs) {
+    return absl::UnimplementedError(
+        "CrossHostTransferBuffers is not implemented.");
   }
 
  private:

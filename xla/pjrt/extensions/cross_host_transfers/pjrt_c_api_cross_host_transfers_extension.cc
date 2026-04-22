@@ -30,6 +30,8 @@ limitations under the License.
 #include "xla/future.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_helpers.h"
+#include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
+#include "xla/pjrt/c/pjrt_c_api_raw_buffer_internal.h"
 #include "xla/pjrt/c/pjrt_c_api_status_utils.h"
 #include "xla/pjrt/c/pjrt_c_api_wrapper_impl.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -127,6 +129,45 @@ xla::PjRtCrossHostRecvNotifier CCrossHostRecvNotifierToCpp(
   };
 }
 }  // namespace
+
+PJRT_Error* PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers(
+    PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers_Args* args) {
+  PJRT_RETURN_IF_ERROR(ActualStructSizeIsGreaterOrEqual(
+      "PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers_Args",
+      PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers_Args_STRUCT_SIZE,
+      args->struct_size));
+
+  // Wrap transfer dependencies into PjRtDeviceEventRefs.
+  std::vector<xla::PjRtDeviceEventRef> transfer_dependencies;
+  transfer_dependencies.reserve(args->num_dependencies);
+  for (int i = 0; i < args->num_dependencies; ++i) {
+    transfer_dependencies.push_back(
+        xla::PjRtDeviceEventRef(*args->transfer_dependencies[i]));
+  }
+
+  // Form transfer specs.
+  std::vector<xla::PjRtClient::CrossHostTransferSpec> transfer_specs;
+  transfer_specs.reserve(args->num_transfers);
+  for (int i = 0; i < args->num_transfers; ++i) {
+    transfer_specs.push_back(xla::PjRtClient::CrossHostTransferSpec{
+        args->src_global_device_ids[i], args->dst_global_device_ids[i],
+        args->raw_buffers[i]->buffer});
+  }
+
+  // Call into underlying CrossHostTransferBuffers implementation.
+  PJRT_ASSIGN_OR_RETURN(
+      std::vector<xla::PjRtDeviceEventRef> transfer_events,
+      args->client->client->CrossHostTransferBuffers(
+          std::move(transfer_dependencies), std::move(transfer_specs)));
+
+  // Populate the output PJRT_DeviceEvents.
+  for (int i = 0; i < args->num_transfers; ++i) {
+    PJRT_DeviceEvent* transfer_event = new PJRT_DeviceEvent;
+    *transfer_event = transfer_events[i].ToCApiDeviceEvent();
+    args->transfer_events[i] = transfer_event;
+  }
+  return nullptr;
+}
 
 PJRT_Error* PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers(
     PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers_Args* args) {
@@ -403,6 +444,8 @@ PJRT_CrossHostTransfers_Extension CreateCrossHostTransfersExtension(
       PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers,
       /*PJRT_Transfers_PJRT_Client_CrossHostSendBuffers=*/
       PJRT_Transfers_PJRT_Client_CrossHostSendBuffers,
+      /*PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers=*/
+      PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers,
   };
 }
 
