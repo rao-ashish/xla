@@ -444,6 +444,8 @@ PJRT_CrossHostTransfers_Extension CreateCrossHostTransfersExtension(
       PJRT_Transfers_PJRT_Client_CrossHostReceiveBuffers,
       /*PJRT_Transfers_PJRT_Client_CrossHostSendBuffers=*/
       PJRT_Transfers_PJRT_Client_CrossHostSendBuffers,
+      /*PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers=*/
+      PJRT_Transfers_PJRT_Client_CrossHostTransferBuffers,
   };
 }
 
